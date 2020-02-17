@@ -17,6 +17,10 @@ package awsspec
 import (
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
@@ -26,11 +30,12 @@ import (
 type CreateTargetgroup struct {
 	_                   string `action:"create" entity:"targetgroup" awsAPI:"elbv2" awsCall:"CreateTargetGroup" awsInput:"elbv2.CreateTargetGroupInput" awsOutput:"elbv2.CreateTargetGroupOutput"`
 	logger              *logger.Logger
+	graph               cloud.GraphAPI
 	api                 elbv2iface.ELBV2API
-	Name                *string `awsName:"Name" awsType:"awsstr" templateName:"name" required:""`
-	Port                *int64  `awsName:"Port" awsType:"awsint64" templateName:"port" required:""`
-	Protocol            *string `awsName:"Protocol" awsType:"awsstr" templateName:"protocol" required:""`
-	Vpc                 *string `awsName:"VpcId" awsType:"awsstr" templateName:"vpc" required:""`
+	Name                *string `awsName:"Name" awsType:"awsstr" templateName:"name"`
+	Port                *int64  `awsName:"Port" awsType:"awsint64" templateName:"port"`
+	Protocol            *string `awsName:"Protocol" awsType:"awsstr" templateName:"protocol"`
+	Vpc                 *string `awsName:"VpcId" awsType:"awsstr" templateName:"vpc"`
 	Healthcheckinterval *int64  `awsName:"HealthCheckIntervalSeconds" awsType:"awsint64" templateName:"healthcheckinterval"`
 	Healthcheckpath     *string `awsName:"HealthCheckPath" awsType:"awsstr" templateName:"healthcheckpath"`
 	Healthcheckport     *string `awsName:"HealthCheckPort" awsType:"awsstr" templateName:"healthcheckport"`
@@ -41,8 +46,10 @@ type CreateTargetgroup struct {
 	Matcher             *string `awsName:"Matcher.HttpCode" awsType:"awsstr" templateName:"matcher"`
 }
 
-func (cmd *CreateTargetgroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateTargetgroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name"), params.Key("port"), params.Key("protocol"), params.Key("vpc"),
+		params.Opt("healthcheckinterval", "healthcheckpath", "healthcheckport", "healthcheckprotocol", "healthchecktimeout", "healthythreshold", "matcher", "unhealthythreshold"),
+	))
 }
 
 func (cmd *CreateTargetgroup) ExtractResult(i interface{}) string {
@@ -52,8 +59,9 @@ func (cmd *CreateTargetgroup) ExtractResult(i interface{}) string {
 type UpdateTargetgroup struct {
 	_                   string `action:"update" entity:"targetgroup" awsAPI:"elbv2"`
 	logger              *logger.Logger
+	graph               cloud.GraphAPI
 	api                 elbv2iface.ELBV2API
-	Id                  *string `awsName:"TargetGroupArn" awsType:"awsstr" templateName:"id" required:""`
+	Id                  *string `awsName:"TargetGroupArn" awsType:"awsstr" templateName:"id"`
 	Deregistrationdelay *string `awsType:"awsstr" templateName:"deregistrationdelay"`
 	Stickiness          *string `awsType:"awsstr" templateName:"stickiness"`
 	Stickinessduration  *string `awsType:"awsstr" templateName:"stickinessduration"`
@@ -67,11 +75,13 @@ type UpdateTargetgroup struct {
 	Matcher             *string `awsName:"Matcher.HttpCode" awsType:"awsstr" templateName:"matcher"`
 }
 
-func (cmd *UpdateTargetgroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *UpdateTargetgroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"),
+		params.Opt("deregistrationdelay", "healthcheckinterval", "healthcheckpath", "healthcheckport", "healthcheckprotocol", "healthchecktimeout", "healthythreshold", "matcher", "stickiness", "stickinessduration", "unhealthythreshold"),
+	))
 }
 
-func (tg *UpdateTargetgroup) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (tg *UpdateTargetgroup) ManualRun(renv env.Running) (interface{}, error) {
 	tgArn := StringValue(tg.Id)
 
 	attrsInput := &elbv2.ModifyTargetGroupAttributesInput{}
@@ -102,7 +112,7 @@ func (tg *UpdateTargetgroup) ManualRun(ctx map[string]interface{}) (interface{},
 	var err error
 
 	if areTargetAttrsModified {
-		if err = setFieldWithType(tgArn, attrsInput, "TargetGroupArn", awsstr, ctx); err != nil {
+		if err = setFieldWithType(tgArn, attrsInput, "TargetGroupArn", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 		start := time.Now()
@@ -116,55 +126,55 @@ func (tg *UpdateTargetgroup) ManualRun(ctx map[string]interface{}) (interface{},
 	var isTargetGroupModified bool
 
 	if v := tg.Healthcheckinterval; v != nil {
-		if err = setFieldWithType(v, input, "HealthCheckIntervalSeconds", awsint64, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthCheckIntervalSeconds", awsint64, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Healthcheckpath; v != nil {
-		if err = setFieldWithType(v, input, "HealthCheckPath", awsstr, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthCheckPath", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Healthcheckport; v != nil {
-		if err = setFieldWithType(v, input, "HealthCheckPort", awsstr, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthCheckPort", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 	}
 	if v := tg.Healthcheckprotocol; v != nil {
-		if err = setFieldWithType(v, input, "HealthCheckProtocol", awsstr, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthCheckProtocol", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Healthchecktimeout; v != nil {
-		if err = setFieldWithType(v, input, "HealthCheckTimeoutSeconds", awsint64, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthCheckTimeoutSeconds", awsint64, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Healthythreshold; v != nil {
-		if err = setFieldWithType(v, input, "HealthyThresholdCount", awsint64, ctx); err != nil {
+		if err = setFieldWithType(v, input, "HealthyThresholdCount", awsint64, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Unhealthythreshold; v != nil {
-		if err = setFieldWithType(v, input, "UnhealthyThresholdCount", awsint64, ctx); err != nil {
+		if err = setFieldWithType(v, input, "UnhealthyThresholdCount", awsint64, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 	if v := tg.Matcher; v != nil {
-		if err = setFieldWithType(v, input, "Matcher.HttpCode", awsstr, ctx); err != nil {
+		if err = setFieldWithType(v, input, "Matcher.HttpCode", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 		isTargetGroupModified = true
 	}
 
 	if isTargetGroupModified {
-		if err = setFieldWithType(tgArn, input, "TargetGroupArn", awsstr, ctx); err != nil {
+		if err = setFieldWithType(tgArn, input, "TargetGroupArn", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 		start := time.Now()
@@ -178,10 +188,11 @@ func (tg *UpdateTargetgroup) ManualRun(ctx map[string]interface{}) (interface{},
 type DeleteTargetgroup struct {
 	_      string `action:"delete" entity:"targetgroup" awsAPI:"elbv2" awsCall:"DeleteTargetGroup" awsInput:"elbv2.DeleteTargetGroupInput" awsOutput:"elbv2.DeleteTargetGroupOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    elbv2iface.ELBV2API
-	Id     *string `awsName:"TargetGroupArn" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"TargetGroupArn" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteTargetgroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteTargetgroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }

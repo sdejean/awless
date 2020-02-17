@@ -21,6 +21,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/ecs"
@@ -31,11 +35,12 @@ import (
 type StartContainertask struct {
 	_                         string `action:"start" entity:"containertask" awsAPI:"ecs"`
 	logger                    *logger.Logger
+	graph                     cloud.GraphAPI
 	api                       ecsiface.ECSAPI
-	Cluster                   *string `templateName:"cluster" required:""`
-	DesiredCount              *int64  `templateName:"desired-count" required:""`
-	Name                      *string `templateName:"name" required:""`
-	Type                      *string `templateName:"type" required:""`
+	Cluster                   *string `templateName:"cluster"`
+	DesiredCount              *int64  `templateName:"desired-count"`
+	Name                      *string `templateName:"name"`
+	Type                      *string `templateName:"type"`
 	Role                      *string `templateName:"role"`
 	DeploymentName            *string `templateName:"deployment-name"`
 	LoadBalancerContainerName *string `templateName:"loadbalancer.container-name"`
@@ -43,21 +48,25 @@ type StartContainertask struct {
 	LoadBalancerTargetgroup   *string `templateName:"loadbalancer.targetgroup"`
 }
 
-func (cmd *StartContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *StartContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("cluster"), params.Key("desired-count"), params.Key("name"), params.Key("type"), params.Opt("deployment-name", "loadbalancer.container-name", "loadbalancer.container-port", "loadbalancer.targetgroup", "role")),
+		params.Validators{
+			"type": func(i interface{}, others map[string]interface{}) error {
+				typ := fmt.Sprint(i)
+				if typ != "task" && typ != "service" {
+					return fmt.Errorf("expected any of [task service] but got %s", typ)
+				}
+				_, hasDepName := others["deployment-name"]
+				if typ == "service" && !hasDepName {
+					return errors.New("missing required param 'deployment-name' when type=service")
+				}
+				return nil
+			},
+		})
 }
 
-func (cmd *StartContainertask) Validate_Type() error {
-	if err := NewEnumValidator("task", "service").Validate(cmd.Type); err != nil {
-		return err
-	}
-	if StringValue(cmd.Type) == "service" && cmd.DeploymentName == nil {
-		return errors.New("missing required param when type=service: 'deployment-name'")
-	}
-	return nil
-}
-
-func (cmd *StartContainertask) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *StartContainertask) ManualRun(renv env.Running) (interface{}, error) {
 	switch StringValue(cmd.Type) {
 	case "service":
 		setters := []setter{
@@ -128,31 +137,37 @@ func (cmd *StartContainertask) ExtractResult(i interface{}) string {
 type StopContainertask struct {
 	_              string `action:"stop" entity:"containertask" awsAPI:"ecs"`
 	logger         *logger.Logger
+	graph          cloud.GraphAPI
 	api            ecsiface.ECSAPI
-	Cluster        *string `templateName:"cluster" required:""`
-	Type           *string `templateName:"type" required:""`
+	Cluster        *string `templateName:"cluster"`
+	Type           *string `templateName:"type"`
 	DeploymentName *string `templateName:"deployment-name"`
 	RunArn         *string `templateName:"run-arn"`
 }
 
-func (cmd *StopContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *StopContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("cluster"), params.Key("type"), params.Opt("deployment-name", "run-arn")),
+		params.Validators{
+			"type": func(i interface{}, others map[string]interface{}) error {
+				typ := fmt.Sprint(i)
+				if typ != "task" && typ != "service" {
+					return fmt.Errorf("expected any of [task service] but got %s", typ)
+				}
+				_, hasDepName := others["deployment-name"]
+				if typ == "service" && !hasDepName {
+					return errors.New("missing required param 'deployment-name' when type=service")
+				}
+				_, hasRunARN := others["run-arn"]
+				if typ == "task" && !hasRunARN {
+					return errors.New("missing required param 'run-arn' when type=task")
+				}
+				return nil
+			},
+		})
 }
 
-func (cmd *StopContainertask) Validate_Type() error {
-	if err := NewEnumValidator("task", "service").Validate(cmd.Type); err != nil {
-		return err
-	}
-	if StringValue(cmd.Type) == "service" && cmd.DeploymentName == nil {
-		return errors.New("missing required param when type=service: 'deployment-name'")
-	}
-	if StringValue(cmd.Type) == "task" && cmd.RunArn == nil {
-		return errors.New("missing required param when type=service: 'run-arn'")
-	}
-	return nil
-}
-
-func (cmd *StopContainertask) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *StopContainertask) ManualRun(renv env.Running) (interface{}, error) {
 	switch StringValue(cmd.Type) {
 	case "service":
 		call := &awsCall{
@@ -184,25 +199,29 @@ func (cmd *StopContainertask) ManualRun(ctx map[string]interface{}) (interface{}
 type UpdateContainertask struct {
 	_              string `action:"update" entity:"containertask" awsAPI:"ecs" awsCall:"UpdateService" awsInput:"ecs.UpdateServiceInput" awsOutput:"ecs.UpdateServiceOutput"`
 	logger         *logger.Logger
+	graph          cloud.GraphAPI
 	api            ecsiface.ECSAPI
-	Cluster        *string `awsName:"Cluster" awsType:"awsstr" templateName:"cluster" required:""`
-	DeploymentName *string `awsName:"Service" awsType:"awsstr" templateName:"deployment-name" required:""`
+	Cluster        *string `awsName:"Cluster" awsType:"awsstr" templateName:"cluster"`
+	DeploymentName *string `awsName:"Service" awsType:"awsstr" templateName:"deployment-name"`
 	DesiredCount   *int64  `awsName:"DesiredCount" awsType:"awsint64" templateName:"desired-count"`
 	Name           *string `awsName:"TaskDefinition" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *UpdateContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *UpdateContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("cluster"), params.Key("deployment-name"),
+		params.Opt("desired-count", "name"),
+	))
 }
 
 type AttachContainertask struct {
 	_               string `action:"attach" entity:"containertask" awsAPI:"ecs"`
 	logger          *logger.Logger
+	graph           cloud.GraphAPI
 	api             ecsiface.ECSAPI
-	Name            *string   `templateName:"name" required:""`
-	ContainerName   *string   `templateName:"container-name" required:""`
-	Image           *string   `templateName:"image" required:""`
-	MemoryHardLimit *int64    `templateName:"memory-hard-limit" required:""`
+	Name            *string   `templateName:"name"`
+	ContainerName   *string   `templateName:"container-name"`
+	Image           *string   `templateName:"image"`
+	MemoryHardLimit *int64    `templateName:"memory-hard-limit"`
 	Commands        []*string `templateName:"command"`
 	Env             []*string `templateName:"env"`
 	Privileged      *bool     `templateName:"privileged"`
@@ -210,11 +229,13 @@ type AttachContainertask struct {
 	Ports           []*string `templateName:"ports"`
 }
 
-func (cmd *AttachContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("container-name"), params.Key("image"), params.Key("memory-hard-limit"), params.Key("name"),
+		params.Opt("command", "env", "ports", "privileged", "workdir"),
+	))
 }
 
-func (cmd *AttachContainertask) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AttachContainertask) ManualRun(renv env.Running) (interface{}, error) {
 	var taskDefinitionInput *ecs.RegisterTaskDefinitionInput
 	taskDefinitionName := StringValue(cmd.Name)
 
@@ -305,16 +326,17 @@ func (cmd *AttachContainertask) ExtractResult(i interface{}) string {
 type DetachContainertask struct {
 	_             string `action:"detach" entity:"containertask" awsAPI:"ecs"`
 	logger        *logger.Logger
+	graph         cloud.GraphAPI
 	api           ecsiface.ECSAPI
-	Name          *string `templateName:"name" required:""`
-	ContainerName *string `templateName:"container-name" required:""`
+	Name          *string `templateName:"name"`
+	ContainerName *string `templateName:"container-name"`
 }
 
-func (cmd *DetachContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("container-name"), params.Key("name")))
 }
 
-func (cmd *DetachContainertask) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachContainertask) ManualRun(renv env.Running) (interface{}, error) {
 	taskdefOutput, err := cmd.api.DescribeTaskDefinition(&ecs.DescribeTaskDefinitionInput{
 		TaskDefinition: cmd.Name,
 	})
@@ -373,16 +395,19 @@ func (cmd *DetachContainertask) ManualRun(ctx map[string]interface{}) (interface
 type DeleteContainertask struct {
 	_           string `action:"delete" entity:"containertask" awsAPI:"ecs" awsDryRun:"manual"`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         ecsiface.ECSAPI
-	Name        *string `templateName:"name" required:""`
+	Name        *string `templateName:"name"`
 	AllVersions *bool   `templateName:"all-versions"`
 }
 
-func (cmd *DeleteContainertask) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteContainertask) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name"),
+		params.Opt("all-versions"),
+	))
 }
 
-func (cmd *DeleteContainertask) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *DeleteContainertask) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	if err := cmd.inject(params); err != nil {
 		return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 	}
@@ -410,7 +435,7 @@ func (cmd *DeleteContainertask) DryRun(ctx, params map[string]interface{}) (inte
 	return nil, nil
 }
 
-func (cmd *DeleteContainertask) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DeleteContainertask) ManualRun(renv env.Running) (interface{}, error) {
 	taskDefinitionName := StringValue(cmd.Name)
 
 	if BoolValue(cmd.AllVersions) {

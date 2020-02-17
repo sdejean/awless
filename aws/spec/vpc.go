@@ -16,7 +16,9 @@ limitations under the License.
 package awsspec
 
 import (
-	"net"
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
 
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -27,35 +29,34 @@ import (
 type CreateVpc struct {
 	_      string `action:"create" entity:"vpc" awsAPI:"ec2" awsCall:"CreateVpc" awsInput:"ec2.CreateVpcInput" awsOutput:"ec2.CreateVpcOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	CIDR   *string `awsName:"CidrBlock" awsType:"awsstr" templateName:"cidr" required:""`
+	CIDR   *string `awsName:"CidrBlock" awsType:"awsstr" templateName:"cidr"`
 	Name   *string `awsName:"Name" templateName:"name"`
 }
 
-func (cmd *CreateVpc) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
-}
-
-func (cmd *CreateVpc) Validate_CIDR() error {
-	_, _, err := net.ParseCIDR(StringValue(cmd.CIDR))
-	return err
+func (cmd *CreateVpc) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("cidr"), params.Opt(params.Suggested("name"))),
+		params.Validators{"cidr": params.IsCIDR})
 }
 
 func (cmd *CreateVpc) ExtractResult(i interface{}) string {
 	return awssdk.StringValue(i.(*ec2.CreateVpcOutput).Vpc.VpcId)
 }
 
-func (cmd *CreateVpc) AfterRun(ctx map[string]interface{}, output interface{}) error {
-	return createNameTag(awssdk.String(cmd.ExtractResult(output)), cmd.Name, ctx)
+func (cmd *CreateVpc) AfterRun(renv env.Running, output interface{}) error {
+	return createNameTag(awssdk.String(cmd.ExtractResult(output)), cmd.Name, renv)
 }
 
 type DeleteVpc struct {
 	_      string `action:"delete" entity:"vpc" awsAPI:"ec2" awsCall:"DeleteVpc" awsInput:"ec2.DeleteVpcInput" awsOutput:"ec2.DeleteVpcOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	Id     *string `awsName:"VpcId" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"VpcId" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteVpc) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteVpc) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }

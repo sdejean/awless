@@ -95,4 +95,37 @@ func TestDatabase(t *testing.T) {
 		}).ExpectCalls("DescribeDBInstances").Run(t)
 	})
 
+	t.Run("start", func(t *testing.T) {
+		Template("start database id=db-1234").
+			Mock(&rdsMock{
+				StartDBInstanceFunc: func(param0 *rds.StartDBInstanceInput) (*rds.StartDBInstanceOutput, error) {
+					return nil, nil
+				},
+			}).ExpectInput("StartDBInstance", &rds.StartDBInstanceInput{
+			DBInstanceIdentifier: String("db-1234"),
+		}).ExpectCalls("StartDBInstance").Run(t)
+	})
+
+	t.Run("stop", func(t *testing.T) {
+		Template("stop database id=db-1234").
+			Mock(&rdsMock{
+				StopDBInstanceFunc: func(param0 *rds.StopDBInstanceInput) (*rds.StopDBInstanceOutput, error) {
+					return nil, nil
+				},
+			}).ExpectInput("StopDBInstance", &rds.StopDBInstanceInput{
+			DBInstanceIdentifier: String("db-1234"),
+		}).ExpectCalls("StopDBInstance").Run(t)
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		Template("restart database id=db-1234 with-failover=true").
+			Mock(&rdsMock{
+				RebootDBInstanceFunc: func(param0 *rds.RebootDBInstanceInput) (*rds.RebootDBInstanceOutput, error) {
+					return nil, nil
+				},
+			}).ExpectInput("RebootDBInstance", &rds.RebootDBInstanceInput{
+			DBInstanceIdentifier: String("db-1234"),
+			ForceFailover:        Bool(true),
+		}).ExpectCalls("RebootDBInstance").Run(t)
+	})
 }

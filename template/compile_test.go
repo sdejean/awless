@@ -7,8 +7,62 @@ import (
 
 	"github.com/wallix/awless/aws/spec"
 	"github.com/wallix/awless/template"
+	"github.com/wallix/awless/template/env"
 	"github.com/wallix/awless/template/internal/ast"
 )
+
+func TestDryRun(t *testing.T) {
+	env := template.NewEnv().WithLookupCommandFunc(func(tokens ...string) interface{} {
+		return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+	}).Build()
+
+	t.Run("return error", func(t *testing.T) {
+		tpl := template.MustParse("create instance userdata=/invalid-file count=1 image=ami-123456 name=any subnet=any type=t2.micro")
+		_, _, err := template.Compile(tpl, env, template.NewRunnerCompileMode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tpl.DryRun(template.NewRunEnv(env)); err == nil {
+			t.Fatal("expected error got none")
+		}
+	})
+}
+
+func TestParamsProcessing(t *testing.T) {
+	env := template.NewEnv().WithLookupCommandFunc(func(tokens ...string) interface{} {
+		return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+	}).Build()
+
+	t.Run("unexpected param", func(t *testing.T) {
+		tpl := template.MustParse("create instance invalid=any")
+		_, _, err := template.Compile(tpl, env, template.NewRunnerCompileMode)
+		if err == nil {
+			t.Fatal("expected err got none")
+		}
+		if got, want := err.Error(), "create instance: unexpected param(s): invalid"; !strings.Contains(got, want) {
+			t.Fatalf("%s should contain %s", got, want)
+		}
+	})
+
+	t.Run("normalizing missing required params as holes", func(t *testing.T) {
+		tpl := template.MustParse("create instance image=ami-123456")
+		compiled, _, _ := template.Compile(tpl, env, template.NewRunnerCompileMode)
+		if got, want := compiled.String(), "create instance count={instance.count} image=ami-123456 name={instance.name} subnet={instance.subnet} type={instance.type}"; got != want {
+			t.Fatalf("%s should contain %s", got, want)
+		}
+	})
+
+	t.Run("format validation", func(t *testing.T) {
+		tpl := template.MustParse("check instance state=woot id=i-45678 timeout=180")
+		_, _, err := template.Compile(tpl, env, template.NewRunnerCompileMode)
+		if err == nil {
+			t.Fatal("expected err got none")
+		}
+		if got, want := err.Error(), "expected any of"; !strings.Contains(got, want) {
+			t.Fatalf("%s should contain %s", got, want)
+		}
+	})
+}
 
 func TestWholeCompilation(t *testing.T) {
 	tcases := []struct {
@@ -116,9 +170,18 @@ create loadbalancer name=mylb subnets=subnet-1, subnet-2
 	}
 
 	for i, tcase := range tcases {
-		env := template.NewEnv()
+		cenv := template.NewEnv().WithAliasFunc(func(p, v string) string {
+			vals := map[string]string{
+				"vpc":      "vpc-1234",
+				"subalias": "sub-1111",
+				"sub":      "sub-2345",
+			}
+			return vals[v]
+		}).WithLookupCommandFunc(func(tokens ...string) interface{} {
+			return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+		}).Build()
 
-		env.AddFillers(map[string]interface{}{
+		cenv.Push(env.FILLERS, map[string]interface{}{
 			"instance.type":   "t2.micro",
 			"test.cidr":       "10.0.2.0/24",
 			"instance.count":  42,
@@ -129,25 +192,13 @@ create loadbalancer name=mylb subnets=subnet-1, subnet-2
 			"mysubnet5.hole":  "mysubnet-5",
 			"version":         10,
 			"instance.name":   "myinstance",
-			"hole":            ast.NewAliasValue("sub"),
-			"private.subnets": []interface{}{"sub-1234", "sub-2345"},
+			"hole":            ast.NewAliasNode("sub"),
+			"private.subnets": ast.NewListNode([]interface{}{"sub-1234", "sub-2345"}),
 		})
-		env.AliasFunc = func(e, k, v string) string {
-			vals := map[string]string{
-				"vpc":      "vpc-1234",
-				"subalias": "sub-1111",
-				"sub":      "sub-2345",
-			}
-			return vals[v]
-		}
-
-		env.Lookuper = func(tokens ...string) interface{} {
-			return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
-		}
 
 		inTpl := template.MustParse(tcase.tpl)
 
-		compiled, _, err := template.Compile(inTpl, env, template.NewRunnerCompileMode)
+		compiled, _, err := template.Compile(inTpl, cenv, template.NewRunnerCompileMode)
 		if err != nil {
 			t.Fatalf("%d: %s", i+1, err)
 		}
@@ -156,12 +207,12 @@ create loadbalancer name=mylb subnets=subnet-1, subnet-2
 			t.Fatalf("%d: got\n%s\nwant\n%s", i+1, got, want)
 		}
 
-		if got, want := env.GetProcessedFillers(), tcase.expProcessedFillers; !reflect.DeepEqual(got, want) {
+		if got, want := cenv.Get(env.PROCESSED_FILLERS), tcase.expProcessedFillers; !reflect.DeepEqual(got, want) {
 			t.Fatalf("%d: got %v, want %v", i+1, got, want)
 		}
 
-		if got, want := env.ResolvedVariables, tcase.expResolvedVariables; !reflect.DeepEqual(got, want) {
-			t.Fatalf("%d: got %v, want %v", i+1, got, want)
+		if got, want := cenv.Get(env.RESOLVED_VARS), tcase.expResolvedVariables; !reflect.DeepEqual(got, want) {
+			t.Fatalf("%d: got\n%#v\nwant\n%#v\n", i+1, got, want)
 		}
 	}
 }
@@ -189,7 +240,7 @@ func TestExternallyProvidedParams(t *testing.T) {
 			template:            `create loadbalancer name=elbv2 subnets={my.subnets}`,
 			externalParams:      "my.subnets=[@sub1, @sub2]",
 			expect:              `create loadbalancer name=elbv2 subnets=[subnet-123,subnet-234]`,
-			expProcessedFillers: map[string]interface{}{"my.subnets": []string{"@sub1", "@sub2"}},
+			expProcessedFillers: map[string]interface{}{"my.subnets": []interface{}{"@sub1", "@sub2"}},
 		},
 		{
 			template:            `create loadbalancer name={my.name} subnets={my.subnets}`,
@@ -199,27 +250,26 @@ func TestExternallyProvidedParams(t *testing.T) {
 		}, //retro-compatibility with old list style, without brackets
 	}
 	for i, tcase := range tcases {
-		env := template.NewEnv()
-		env.Lookuper = func(tokens ...string) interface{} {
-			return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+		externalFillters, err := template.ParseParams(tcase.externalParams)
+		if err != nil {
+			t.Fatal(err)
 		}
-		env.AliasFunc = func(e, k, v string) string {
+		cenv := template.NewEnv().WithLookupCommandFunc(func(tokens ...string) interface{} {
+			return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+		}).WithAliasFunc(func(p, v string) string {
 			vals := map[string]string{
 				"subalias": "subnet-111",
 				"sub1":     "subnet-123",
 				"sub2":     "subnet-234",
 			}
 			return vals[v]
-		}
+		}).Build()
 
-		externalFillters, err := template.ParseParams(tcase.externalParams)
-		if err != nil {
-			t.Fatal(err)
-		}
-		env.Fillers = externalFillters
+		cenv.Push(env.FILLERS, externalFillters)
+
 		inTpl := template.MustParse(tcase.template)
 
-		compiled, _, err := template.Compile(inTpl, env, template.NewRunnerCompileMode)
+		compiled, _, err := template.Compile(inTpl, cenv, template.NewRunnerCompileMode)
 		if err != nil {
 			t.Fatalf("%d: %s", i+1, err)
 		}
@@ -228,7 +278,7 @@ func TestExternallyProvidedParams(t *testing.T) {
 			t.Fatalf("%d: got\n%s\nwant\n%s", i+1, got, want)
 		}
 
-		if got, want := env.GetProcessedFillers(), tcase.expProcessedFillers; !reflect.DeepEqual(got, want) {
+		if got, want := cenv.Get(env.PROCESSED_FILLERS), tcase.expProcessedFillers; !reflect.DeepEqual(got, want) {
 			t.Fatalf("%d: got %#v, want %#v", i+1, got, want)
 		}
 	}

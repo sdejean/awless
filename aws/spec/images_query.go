@@ -10,6 +10,7 @@ import (
 
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ec2"
+	"github.com/wallix/awless/aws/doc"
 )
 
 // Image resolving allows to find AWS AMIs identifiers specifying what you want instead
@@ -35,6 +36,8 @@ import (
 // - canonical:::i386
 //
 // - redhat::::instance-store
+//
+// - centos:centos
 //
 // The default values are: Arch="x86_64", Virt="hvm", Store="ebs"
 type ImageResolver func(*ec2.DescribeImagesInput) (*ec2.DescribeImagesOutput, error)
@@ -212,6 +215,8 @@ var (
 		"redhat":      RedHat,
 		"debian":      Debian,
 		"amazonlinux": AmazonLinux,
+		"coreos":      CoreOS,
+		"centos":      CentOS,
 		"suselinux":   SuseLinux,
 		"windows":     Windows,
 	}
@@ -224,23 +229,37 @@ var (
 	}
 
 	RedHat = Platform{
-		Name: "redhat", Id: "309956199498", DistroName: "rhel", LatestVariant: "7.3",
+		Name: "redhat", Id: "309956199498", DistroName: "rhel", LatestVariant: "7.5",
 		MatchFunc: func(s string, d Distro) bool {
 			return strings.Contains(s, fmt.Sprintf("%s-%s", d.Name, d.Variant))
 		},
 	}
 
 	Debian = Platform{
-		Name: "debian", Id: "379101102735", DistroName: "debian", LatestVariant: "jessie",
+		Name: "debian", Id: "379101102735", DistroName: "debian", LatestVariant: "stretch",
 		MatchFunc: func(s string, d Distro) bool {
 			return strings.HasPrefix(s, fmt.Sprintf("%s-%s", d.Name, d.Variant))
 		},
 	}
 
-	AmazonLinux = Platform{
-		Name: "amazonlinux", Id: "137112412989", LatestVariant: "hvm",
+	CoreOS = Platform{
+		Name: "coreos", Id: "595879546273", DistroName: "coreos", LatestVariant: "1688",
 		MatchFunc: func(s string, d Distro) bool {
-			return strings.HasPrefix(s, fmt.Sprintf("amzn-ami-%s", d.Variant))
+			return strings.HasPrefix(s, strings.ToLower(fmt.Sprintf("%s-stable-%s", d.Name, d.Variant)))
+		},
+	}
+
+	CentOS = Platform{
+		Name: "centos", Id: "679593333241", DistroName: "centos", LatestVariant: "7",
+		MatchFunc: func(s string, d Distro) bool {
+			return strings.HasPrefix(s, strings.ToLower(fmt.Sprintf("%s Linux %s", d.Name, d.Variant)))
+		},
+	}
+
+	AmazonLinux = Platform{
+		Name: "amazonlinux", Id: "137112412989", DistroName: "amzn", LatestVariant: "hvm",
+		MatchFunc: func(s string, d Distro) bool {
+			return strings.HasPrefix(s, fmt.Sprintf("%s-ami-%s", d.Name, d.Variant))
 		},
 	}
 
@@ -269,6 +288,7 @@ func init() {
 	for name := range Platforms {
 		SupportedAMIOwners = append(SupportedAMIOwners, name)
 	}
+	awsdoc.CommandDefinitionsDoc["create.instance"] = fmt.Sprintf("Create an EC2 instance.\n\nThe `distro` param allows to resolve from the current region the official community free bare AMI according to an awless specific bare distro query format, ordering by latest first. The query string specification is the following column separated format:\n\n\t\t%s\n\nIn this query format, everything is optional expect for the 'owner'. Supported owners: %s", ImageQuerySpec, strings.Join(SupportedAMIOwners, ", "))
 }
 
 func ParseImageQuery(s string) (ImageQuery, error) {

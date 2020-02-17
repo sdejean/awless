@@ -23,15 +23,19 @@ import (
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
 )
 
 type CreateLoadbalancer struct {
 	_              string `action:"create" entity:"loadbalancer" awsAPI:"elbv2" awsCall:"CreateLoadBalancer" awsInput:"elbv2.CreateLoadBalancerInput" awsOutput:"elbv2.CreateLoadBalancerOutput"`
 	logger         *logger.Logger
+	graph          cloud.GraphAPI
 	api            elbv2iface.ELBV2API
-	Name           *string   `awsName:"Name" awsType:"awsstr" templateName:"name" required:""`
-	Subnets        []*string `awsName:"Subnets" awsType:"awsstringslice" templateName:"subnets" required:""`
+	Name           *string   `awsName:"Name" awsType:"awsstr" templateName:"name"`
+	Subnets        []*string `awsName:"Subnets" awsType:"awsstringslice" templateName:"subnets"`
 	SubnetMappings []*string `awsName:"SubnetMappings" awsType:"awssubnetmappings" templateName:"subnet-mappings"`
 	Iptype         *string   `awsName:"IpAddressType" awsType:"awsstr" templateName:"iptype"`
 	Scheme         *string   `awsName:"Scheme" awsType:"awsstr" templateName:"scheme"`
@@ -39,8 +43,11 @@ type CreateLoadbalancer struct {
 	Type           *string   `awsName:"Type" awsType:"awsstr" templateName:"type"`
 }
 
-func (cmd *CreateLoadbalancer) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateLoadbalancer) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(
+		params.Key("name"), params.Key("subnets"),
+		params.Opt("subnet-mappings", "iptype", "scheme", "securitygroups", "type"),
+	))
 }
 
 func (cmd *CreateLoadbalancer) ExtractResult(i interface{}) string {
@@ -50,32 +57,34 @@ func (cmd *CreateLoadbalancer) ExtractResult(i interface{}) string {
 type DeleteLoadbalancer struct {
 	_      string `action:"delete" entity:"loadbalancer" awsAPI:"elbv2" awsCall:"DeleteLoadBalancer" awsInput:"elbv2.DeleteLoadBalancerInput" awsOutput:"elbv2.DeleteLoadBalancerOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    elbv2iface.ELBV2API
-	Id     *string `awsName:"LoadBalancerArn" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"LoadBalancerArn" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteLoadbalancer) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteLoadbalancer) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }
 
 type CheckLoadbalancer struct {
 	_       string `action:"check" entity:"loadbalancer" awsAPI:"elbv2"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     elbv2iface.ELBV2API
-	Id      *string `templateName:"id" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Id      *string `templateName:"id"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckLoadbalancer) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckLoadbalancer) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("provisioning", "active", "failed", notFoundState),
+		})
 }
 
-func (cmd *CheckLoadbalancer) Validate_State() error {
-	return NewEnumValidator("provisioning", "active", "failed", notFoundState).Validate(cmd.State)
-}
-
-func (cmd *CheckLoadbalancer) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckLoadbalancer) ManualRun(renv env.Running) (interface{}, error) {
 	input := &elbv2.DescribeLoadBalancersInput{
 		LoadBalancerArns: []*string{cmd.Id},
 	}

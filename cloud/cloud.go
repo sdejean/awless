@@ -21,8 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/wallix/awless/graph"
 )
 
 var ErrFetchAccessDenied = errors.New("access denied to cloud resource")
@@ -49,9 +47,10 @@ const (
 	NetworkInterface string = "networkinterface"
 	Certificate      string = "certificate"
 	//loadbalancer
-	LoadBalancer string = "loadbalancer"
-	TargetGroup  string = "targetgroup"
-	Listener     string = "listener"
+	ClassicLoadBalancer string = "classicloadbalancer"
+	LoadBalancer        string = "loadbalancer"
+	TargetGroup         string = "targetgroup"
+	Listener            string = "listener"
 	//database
 	Database      string = "database"
 	DbSubnetGroup string = "dbsubnetgroup"
@@ -103,11 +102,12 @@ const (
 
 type Service interface {
 	Region() string
+	Profile() string
 	Name() string
 	ResourceTypes() []string
 	IsSyncDisabled() bool
-	Fetch(context.Context) (*graph.Graph, error)
-	FetchByType(context.Context, string) (*graph.Graph, error)
+	Fetch(context.Context) (GraphAPI, error)
+	FetchByType(context.Context, string) (GraphAPI, error)
 }
 
 type Services []Service

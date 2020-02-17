@@ -11,44 +11,75 @@ import (
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/elbv2"
+	"github.com/wallix/awless/aws/spec"
 )
 
 func TestInstance(t *testing.T) {
 	t.Run("create", func(t *testing.T) {
-		_, userdataFile, cleanup := generateTmpFile("this is my content with {{ .Variables.oneRef }} content")
-		defer cleanup()
+		t.Run("with distro", func(t *testing.T) {
+			awsspec.DefaultImageResolverCache.Store("canonical:ubuntu:xenial:x86_64:hvm:ebs", []*awsspec.AwsImage{{Id: "ami-123456"}})
 
-		Template("oneRef=awesome\n"+
-			"create instance count=3 image=ami-1234 "+
-			"name=myinstance subnet=sub_1 type=t2.nano keypair=mykp ip=10.2.3.4 "+
-			"userdata="+userdataFile+" securitygroup=sg-1234 lock=true role=myrole").
-			Mock(&ec2Mock{
-				RunInstancesFunc: func(input *ec2.RunInstancesInput) (*ec2.Reservation, error) {
-					return &ec2.Reservation{Instances: []*ec2.Instance{{InstanceId: String("new-instance-id")}}}, nil
+			Template("create instance distro=canonical name=myinstance subnet=sub_1 type=t2.nano count=1").
+				Mock(&ec2Mock{
+					RunInstancesFunc: func(input *ec2.RunInstancesInput) (*ec2.Reservation, error) {
+						return &ec2.Reservation{Instances: []*ec2.Instance{{InstanceId: String("new-instance-id")}}}, nil
+					},
+					CreateTagsRequestFunc: func(input *ec2.CreateTagsInput) (req *request.Request, output *ec2.CreateTagsOutput) {
+						output = &ec2.CreateTagsOutput{}
+						req = request.New(aws.Config{}, metadata.ClientInfo{}, request.Handlers{}, nil, &request.Operation{}, input, output)
+						return
+					},
+				}).ExpectInput("RunInstances", &ec2.RunInstancesInput{
+				SubnetId:     String("sub_1"),
+				ImageId:      String("ami-123456"),
+				InstanceType: String("t2.nano"),
+				MinCount:     Int64(1),
+				MaxCount:     Int64(1),
+			}).ExpectInput("CreateTagsRequest", &ec2.CreateTagsInput{
+				Resources: []*string{String("new-instance-id")},
+				Tags: []*ec2.Tag{
+					{Key: String("Name"), Value: String("myinstance")},
 				},
-				CreateTagsRequestFunc: func(input *ec2.CreateTagsInput) (req *request.Request, output *ec2.CreateTagsOutput) {
-					output = &ec2.CreateTagsOutput{}
-					req = request.New(aws.Config{}, metadata.ClientInfo{}, request.Handlers{}, nil, &request.Operation{}, input, output)
-					return
+			}).ExpectCommandResult("new-instance-id").ExpectCalls("RunInstances", "CreateTagsRequest").
+				ExpectRevert("delete instance id=new-instance-id").Run(t)
+		})
+
+		t.Run("with user data", func(t *testing.T) {
+			_, userdataFile, cleanup := generateTmpFile("this is my content with {{ .AWLESS.oneRef }} content")
+			defer cleanup()
+
+			Template("oneRef=awesome\n"+
+				"create instance count=3 image=ami-1234 "+
+				"name=myinstance subnet=sub_1 type=t2.nano keypair=mykp ip=10.2.3.4 "+
+				"userdata="+userdataFile+" securitygroup=sg-1234 lock=true role=myrole").
+				Mock(&ec2Mock{
+					RunInstancesFunc: func(input *ec2.RunInstancesInput) (*ec2.Reservation, error) {
+						return &ec2.Reservation{Instances: []*ec2.Instance{{InstanceId: String("new-instance-id")}}}, nil
+					},
+					CreateTagsRequestFunc: func(input *ec2.CreateTagsInput) (req *request.Request, output *ec2.CreateTagsOutput) {
+						output = &ec2.CreateTagsOutput{}
+						req = request.New(aws.Config{}, metadata.ClientInfo{}, request.Handlers{}, nil, &request.Operation{}, input, output)
+						return
+					},
+				}).ExpectInput("RunInstances", &ec2.RunInstancesInput{
+				SubnetId:              String("sub_1"),
+				ImageId:               String("ami-1234"),
+				InstanceType:          String("t2.nano"),
+				MinCount:              Int64(3),
+				MaxCount:              Int64(3),
+				KeyName:               String("mykp"),
+				PrivateIpAddress:      String("10.2.3.4"),
+				SecurityGroupIds:      []*string{String("sg-1234")},
+				DisableApiTermination: Bool(true),
+				IamInstanceProfile:    &ec2.IamInstanceProfileSpecification{Name: String("myrole")},
+				UserData:              String(base64.StdEncoding.EncodeToString([]byte("this is my content with awesome content"))),
+			}).ExpectInput("CreateTagsRequest", &ec2.CreateTagsInput{
+				Resources: []*string{String("new-instance-id")},
+				Tags: []*ec2.Tag{
+					{Key: String("Name"), Value: String("myinstance")},
 				},
-			}).ExpectInput("RunInstances", &ec2.RunInstancesInput{
-			SubnetId:              String("sub_1"),
-			ImageId:               String("ami-1234"),
-			InstanceType:          String("t2.nano"),
-			MinCount:              Int64(3),
-			MaxCount:              Int64(3),
-			KeyName:               String("mykp"),
-			PrivateIpAddress:      String("10.2.3.4"),
-			SecurityGroupIds:      []*string{String("sg-1234")},
-			DisableApiTermination: Bool(true),
-			IamInstanceProfile:    &ec2.IamInstanceProfileSpecification{Name: String("myrole")},
-			UserData:              String(base64.StdEncoding.EncodeToString([]byte("this is my content with awesome content"))),
-		}).ExpectInput("CreateTagsRequest", &ec2.CreateTagsInput{
-			Resources: []*string{String("new-instance-id")},
-			Tags: []*ec2.Tag{
-				{Key: String("Name"), Value: String("myinstance")},
-			},
-		}).ExpectCommandResult("new-instance-id").ExpectCalls("RunInstances", "CreateTagsRequest").Run(t)
+			}).ExpectCommandResult("new-instance-id").ExpectCalls("RunInstances", "CreateTagsRequest").Run(t)
+		})
 	})
 
 	t.Run("update", func(t *testing.T) {
@@ -92,7 +123,7 @@ func TestInstance(t *testing.T) {
 		})
 
 		t.Run("multiple ids", func(t *testing.T) {
-			Template("start instance id=id-1234,id-2345").Mock(&ec2Mock{
+			Template("start instance ids=id-1234,id-2345").Mock(&ec2Mock{
 				StartInstancesFunc: func(param0 *ec2.StartInstancesInput) (*ec2.StartInstancesOutput, error) {
 					return &ec2.StartInstancesOutput{
 						StartingInstances: []*ec2.InstanceStateChange{{InstanceId: String("id-1234")}, {InstanceId: String("id-2345")}}}, nil
@@ -114,7 +145,7 @@ func TestInstance(t *testing.T) {
 		})
 
 		t.Run("multiple ids", func(t *testing.T) {
-			Template("stop instance id=id-1234,id-2345").Mock(&ec2Mock{
+			Template("stop instance ids=id-1234,id-2345").Mock(&ec2Mock{
 				StopInstancesFunc: func(param0 *ec2.StopInstancesInput) (*ec2.StopInstancesOutput, error) {
 					return &ec2.StopInstancesOutput{
 						StoppingInstances: []*ec2.InstanceStateChange{{InstanceId: String("id-1234")}, {InstanceId: String("id-2345")}}}, nil
@@ -124,8 +155,28 @@ func TestInstance(t *testing.T) {
 		})
 	})
 
+	t.Run("restart", func(t *testing.T) {
+		t.Run("one id", func(t *testing.T) {
+			Template("restart instance id=id-1234").Mock(&ec2Mock{
+				RebootInstancesFunc: func(param0 *ec2.RebootInstancesInput) (*ec2.RebootInstancesOutput, error) {
+					return &ec2.RebootInstancesOutput{}, nil
+				},
+			}).ExpectInput("RebootInstances", &ec2.RebootInstancesInput{InstanceIds: []*string{String("id-1234")}}).
+				ExpectCalls("RebootInstances").Run(t)
+		})
+
+		t.Run("multiple ids", func(t *testing.T) {
+			Template("restart instance ids=id-1234,id-2345").Mock(&ec2Mock{
+				RebootInstancesFunc: func(param0 *ec2.RebootInstancesInput) (*ec2.RebootInstancesOutput, error) {
+					return &ec2.RebootInstancesOutput{}, nil
+				},
+			}).ExpectInput("RebootInstances", &ec2.RebootInstancesInput{InstanceIds: []*string{String("id-1234"), String("id-2345")}}).
+				ExpectCalls("RebootInstances").Run(t)
+		})
+	})
+
 	t.Run("check", func(t *testing.T) {
-		Template("check instance id=id-1234 state=running timeout=0").Mock(&ec2Mock{
+		Template("check instance id=id-1234 state=running timeout=1").Mock(&ec2Mock{
 			DescribeInstancesFunc: func(input *ec2.DescribeInstancesInput) (*ec2.DescribeInstancesOutput, error) {
 				return &ec2.DescribeInstancesOutput{Reservations: []*ec2.Reservation{
 					{Instances: []*ec2.Instance{{InstanceId: input.InstanceIds[0], State: &ec2.InstanceState{Name: String("running")}}}},

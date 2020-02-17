@@ -19,18 +19,21 @@ import (
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/iam/iamiface"
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/params"
 )
 
 type CreateUser struct {
 	_      string `action:"create" entity:"user" awsAPI:"iam" awsCall:"CreateUser" awsInput:"iam.CreateUserInput" awsOutput:"iam.CreateUserOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *CreateUser) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateUser) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 func (cmd *CreateUser) ExtractResult(i interface{}) string {
@@ -40,34 +43,37 @@ func (cmd *CreateUser) ExtractResult(i interface{}) string {
 type DeleteUser struct {
 	_      string `action:"delete" entity:"user" awsAPI:"iam" awsCall:"DeleteUser" awsInput:"iam.DeleteUserInput" awsOutput:"iam.DeleteUserOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DeleteUser) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteUser) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 type AttachUser struct {
 	_      string `action:"attach" entity:"user" awsAPI:"iam" awsCall:"AddUserToGroup" awsInput:"iam.AddUserToGroupInput" awsOutput:"iam.AddUserToGroupOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Group  *string `awsName:"GroupName" awsType:"awsstr" templateName:"group" required:""`
-	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name" required:""`
+	Group  *string `awsName:"GroupName" awsType:"awsstr" templateName:"group"`
+	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *AttachUser) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachUser) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("group"), params.Key("name")))
 }
 
 type DetachUser struct {
 	_      string `action:"detach" entity:"user" awsAPI:"iam" awsCall:"RemoveUserFromGroup" awsInput:"iam.RemoveUserFromGroupInput" awsOutput:"iam.RemoveUserFromGroupOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Group  *string `awsName:"GroupName" awsType:"awsstr" templateName:"group" required:""`
-	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name" required:""`
+	Group  *string `awsName:"GroupName" awsType:"awsstr" templateName:"group"`
+	Name   *string `awsName:"UserName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DetachUser) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachUser) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("group"), params.Key("name")))
 }

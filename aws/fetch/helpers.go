@@ -10,7 +10,20 @@ func getBoolFromContext(ctx context.Context, key string) bool {
 	return v && ok
 }
 
-func sliceOfSlice(in []*string, maxLength int) (res [][]*string) {
+func getUserFiltersFromContext(ctx context.Context) map[string]string {
+	out := make(map[string]string)
+	arr, ok := ctx.Value("filters").([]string)
+	if ok {
+		for _, keyval := range arr {
+			if splits := strings.SplitN(keyval, "=", 2); len(splits) == 2 {
+				out[strings.ToLower(splits[0])] = splits[1]
+			}
+		}
+	}
+	return out
+}
+
+func sliceOfSlice(in []string, maxLength int) (res [][]string) {
 	if maxLength <= 0 {
 		return
 	}

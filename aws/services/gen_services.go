@@ -46,6 +46,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/ecr/ecriface"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/aws/aws-sdk-go/service/ecs/ecsiface"
+	"github.com/aws/aws-sdk-go/service/elb"
+	"github.com/aws/aws-sdk-go/service/elb/elbiface"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
 	"github.com/aws/aws-sdk-go/service/iam"
@@ -102,6 +104,7 @@ var ResourceTypes = []string{
 	"elasticip",
 	"snapshot",
 	"networkinterface",
+	"classicloadbalancer",
 	"loadbalancer",
 	"targetgroup",
 	"listener",
@@ -140,6 +143,7 @@ var ResourceTypes = []string{
 var ServicePerAPI = map[string]string{
 	"ec2":         "infra",
 	"elbv2":       "infra",
+	"elb":         "infra",
 	"rds":         "infra",
 	"autoscaling": "infra",
 	"ecr":         "infra",
@@ -174,6 +178,7 @@ var ServicePerResourceType = map[string]string{
 	"elasticip":           "infra",
 	"snapshot":            "infra",
 	"networkinterface":    "infra",
+	"classicloadbalancer": "infra",
 	"loadbalancer":        "infra",
 	"targetgroup":         "infra",
 	"listener":            "infra",
@@ -225,6 +230,7 @@ var APIPerResourceType = map[string]string{
 	"elasticip":           "ec2",
 	"snapshot":            "ec2",
 	"networkinterface":    "ec2",
+	"classicloadbalancer": "elb",
 	"loadbalancer":        "elbv2",
 	"targetgroup":         "elbv2",
 	"listener":            "elbv2",
@@ -260,19 +266,14 @@ var APIPerResourceType = map[string]string{
 	"stack":               "cloudformation",
 }
 
-var GlobalServices = []string{
-	"access",
-	"dns",
-	"cdn",
-}
-
 type Infra struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	ec2iface.EC2API
 	elbv2iface.ELBV2API
+	elbiface.ELBAPI
 	rdsiface.RDSAPI
 	autoscalingiface.AutoScalingAPI
 	ecriface.ECRAPI
@@ -281,10 +282,11 @@ type Infra struct {
 	acmiface.ACMAPI
 }
 
-func NewInfra(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewInfra(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	ec2API := ec2.New(sess)
 	elbv2API := elbv2.New(sess)
+	elbAPI := elb.New(sess)
 	rdsAPI := rds.New(sess)
 	autoscalingAPI := autoscaling.New(sess)
 	ecrAPI := ecr.New(sess)
@@ -295,6 +297,7 @@ func NewInfra(sess *session.Session, awsconf config, log *logger.Logger) cloud.S
 	fetchConfig := awsfetch.NewConfig(
 		ec2API,
 		elbv2API,
+		elbAPI,
 		rdsAPI,
 		autoscalingAPI,
 		ecrAPI,
@@ -302,12 +305,13 @@ func NewInfra(sess *session.Session, awsconf config, log *logger.Logger) cloud.S
 		applicationautoscalingAPI,
 		acmAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Infra{
 		EC2API:         ec2API,
 		ELBV2API:       elbv2API,
+		ELBAPI:         elbAPI,
 		RDSAPI:         rdsAPI,
 		AutoScalingAPI: autoscalingAPI,
 		ECRAPI:         ecrAPI,
@@ -315,8 +319,9 @@ func NewInfra(sess *session.Session, awsconf config, log *logger.Logger) cloud.S
 		ApplicationAutoScalingAPI: applicationautoscalingAPI,
 		ACMAPI:  acmAPI,
 		fetcher: fetch.NewFetcher(awsfetch.BuildInfraFetchFuncs(fetchConfig)),
-		config:  awsconf,
+		config:  extraConf,
 		region:  region,
+		profile: profile,
 		log:     log,
 	}
 }
@@ -327,6 +332,10 @@ func (s *Infra) Name() string {
 
 func (s *Infra) Region() string {
 	return s.region
+}
+
+func (s *Infra) Profile() string {
+	return s.profile
 }
 
 func (s *Infra) ResourceTypes() []string {
@@ -346,6 +355,7 @@ func (s *Infra) ResourceTypes() []string {
 		"elasticip",
 		"snapshot",
 		"networkinterface",
+		"classicloadbalancer",
 		"loadbalancer",
 		"targetgroup",
 		"listener",
@@ -363,7 +373,7 @@ func (s *Infra) ResourceTypes() []string {
 	}
 }
 
-func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Infra) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -397,7 +407,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.infra.instance.sync", true) {
+	if getBool(s.config, "aws.infra.instance.sync", true) {
 		list, err := s.fetcher.Get("instance_objects")
 		if err != nil {
 			return gph, err
@@ -419,7 +429,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.subnet.sync", true) {
+	if getBool(s.config, "aws.infra.subnet.sync", true) {
 		list, err := s.fetcher.Get("subnet_objects")
 		if err != nil {
 			return gph, err
@@ -441,7 +451,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.vpc.sync", true) {
+	if getBool(s.config, "aws.infra.vpc.sync", true) {
 		list, err := s.fetcher.Get("vpc_objects")
 		if err != nil {
 			return gph, err
@@ -463,7 +473,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.keypair.sync", true) {
+	if getBool(s.config, "aws.infra.keypair.sync", true) {
 		list, err := s.fetcher.Get("keypair_objects")
 		if err != nil {
 			return gph, err
@@ -485,7 +495,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.securitygroup.sync", true) {
+	if getBool(s.config, "aws.infra.securitygroup.sync", true) {
 		list, err := s.fetcher.Get("securitygroup_objects")
 		if err != nil {
 			return gph, err
@@ -507,7 +517,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.volume.sync", true) {
+	if getBool(s.config, "aws.infra.volume.sync", true) {
 		list, err := s.fetcher.Get("volume_objects")
 		if err != nil {
 			return gph, err
@@ -529,7 +539,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.internetgateway.sync", true) {
+	if getBool(s.config, "aws.infra.internetgateway.sync", true) {
 		list, err := s.fetcher.Get("internetgateway_objects")
 		if err != nil {
 			return gph, err
@@ -551,7 +561,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.natgateway.sync", true) {
+	if getBool(s.config, "aws.infra.natgateway.sync", true) {
 		list, err := s.fetcher.Get("natgateway_objects")
 		if err != nil {
 			return gph, err
@@ -573,7 +583,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.routetable.sync", true) {
+	if getBool(s.config, "aws.infra.routetable.sync", true) {
 		list, err := s.fetcher.Get("routetable_objects")
 		if err != nil {
 			return gph, err
@@ -595,7 +605,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.availabilityzone.sync", true) {
+	if getBool(s.config, "aws.infra.availabilityzone.sync", true) {
 		list, err := s.fetcher.Get("availabilityzone_objects")
 		if err != nil {
 			return gph, err
@@ -617,7 +627,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.image.sync", true) {
+	if getBool(s.config, "aws.infra.image.sync", true) {
 		list, err := s.fetcher.Get("image_objects")
 		if err != nil {
 			return gph, err
@@ -639,7 +649,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.importimagetask.sync", true) {
+	if getBool(s.config, "aws.infra.importimagetask.sync", true) {
 		list, err := s.fetcher.Get("importimagetask_objects")
 		if err != nil {
 			return gph, err
@@ -661,7 +671,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.elasticip.sync", true) {
+	if getBool(s.config, "aws.infra.elasticip.sync", true) {
 		list, err := s.fetcher.Get("elasticip_objects")
 		if err != nil {
 			return gph, err
@@ -683,7 +693,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.snapshot.sync", true) {
+	if getBool(s.config, "aws.infra.snapshot.sync", true) {
 		list, err := s.fetcher.Get("snapshot_objects")
 		if err != nil {
 			return gph, err
@@ -705,7 +715,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.networkinterface.sync", true) {
+	if getBool(s.config, "aws.infra.networkinterface.sync", true) {
 		list, err := s.fetcher.Get("networkinterface_objects")
 		if err != nil {
 			return gph, err
@@ -727,7 +737,29 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.loadbalancer.sync", true) {
+	if getBool(s.config, "aws.infra.classicloadbalancer.sync", true) {
+		list, err := s.fetcher.Get("classicloadbalancer_objects")
+		if err != nil {
+			return gph, err
+		}
+		if _, ok := list.([]*elb.LoadBalancerDescription); !ok {
+			return gph, errors.New("cannot cast to '[]*elb.LoadBalancerDescription' type from fetch context")
+		}
+		for _, r := range list.([]*elb.LoadBalancerDescription) {
+			for _, fn := range addParentsFns["classicloadbalancer"] {
+				wg.Add(1)
+				go func(f addParentFn, snap tstore.RDFGraph, region string, res *elb.LoadBalancerDescription) {
+					defer wg.Done()
+					err := f(gph, snap, region, res)
+					if err != nil {
+						errc <- err
+						return
+					}
+				}(fn, snap, s.region, r)
+			}
+		}
+	}
+	if getBool(s.config, "aws.infra.loadbalancer.sync", true) {
 		list, err := s.fetcher.Get("loadbalancer_objects")
 		if err != nil {
 			return gph, err
@@ -749,7 +781,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.targetgroup.sync", true) {
+	if getBool(s.config, "aws.infra.targetgroup.sync", true) {
 		list, err := s.fetcher.Get("targetgroup_objects")
 		if err != nil {
 			return gph, err
@@ -771,7 +803,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.listener.sync", true) {
+	if getBool(s.config, "aws.infra.listener.sync", true) {
 		list, err := s.fetcher.Get("listener_objects")
 		if err != nil {
 			return gph, err
@@ -793,7 +825,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.database.sync", true) {
+	if getBool(s.config, "aws.infra.database.sync", true) {
 		list, err := s.fetcher.Get("database_objects")
 		if err != nil {
 			return gph, err
@@ -815,7 +847,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.dbsubnetgroup.sync", true) {
+	if getBool(s.config, "aws.infra.dbsubnetgroup.sync", true) {
 		list, err := s.fetcher.Get("dbsubnetgroup_objects")
 		if err != nil {
 			return gph, err
@@ -837,7 +869,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.launchconfiguration.sync", true) {
+	if getBool(s.config, "aws.infra.launchconfiguration.sync", true) {
 		list, err := s.fetcher.Get("launchconfiguration_objects")
 		if err != nil {
 			return gph, err
@@ -859,7 +891,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.scalinggroup.sync", true) {
+	if getBool(s.config, "aws.infra.scalinggroup.sync", true) {
 		list, err := s.fetcher.Get("scalinggroup_objects")
 		if err != nil {
 			return gph, err
@@ -881,7 +913,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.scalingpolicy.sync", true) {
+	if getBool(s.config, "aws.infra.scalingpolicy.sync", true) {
 		list, err := s.fetcher.Get("scalingpolicy_objects")
 		if err != nil {
 			return gph, err
@@ -903,7 +935,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.repository.sync", true) {
+	if getBool(s.config, "aws.infra.repository.sync", true) {
 		list, err := s.fetcher.Get("repository_objects")
 		if err != nil {
 			return gph, err
@@ -925,7 +957,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.containercluster.sync", true) {
+	if getBool(s.config, "aws.infra.containercluster.sync", true) {
 		list, err := s.fetcher.Get("containercluster_objects")
 		if err != nil {
 			return gph, err
@@ -947,7 +979,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.containertask.sync", true) {
+	if getBool(s.config, "aws.infra.containertask.sync", true) {
 		list, err := s.fetcher.Get("containertask_objects")
 		if err != nil {
 			return gph, err
@@ -969,7 +1001,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.container.sync", true) {
+	if getBool(s.config, "aws.infra.container.sync", true) {
 		list, err := s.fetcher.Get("container_objects")
 		if err != nil {
 			return gph, err
@@ -991,7 +1023,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.containerinstance.sync", true) {
+	if getBool(s.config, "aws.infra.containerinstance.sync", true) {
 		list, err := s.fetcher.Get("containerinstance_objects")
 		if err != nil {
 			return gph, err
@@ -1013,7 +1045,7 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.infra.certificate.sync", true) {
+	if getBool(s.config, "aws.infra.certificate.sync", true) {
 		list, err := s.fetcher.Get("certificate_objects")
 		if err != nil {
 			return gph, err
@@ -1054,25 +1086,25 @@ func (s *Infra) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Infra) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Infra) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Infra) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.infra.sync", true)
+	return !getBool(s.config, "aws.infra.sync", true)
 }
 
 type Access struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	iamiface.IAMAPI
 	stsiface.STSAPI
 }
 
-func NewAccess(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewAccess(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := "global"
 	iamAPI := iam.New(sess)
 	stsAPI := sts.New(sess)
@@ -1081,15 +1113,16 @@ func NewAccess(sess *session.Session, awsconf config, log *logger.Logger) cloud.
 		iamAPI,
 		stsAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Access{
 		IAMAPI:  iamAPI,
 		STSAPI:  stsAPI,
 		fetcher: fetch.NewFetcher(awsfetch.BuildAccessFetchFuncs(fetchConfig)),
-		config:  awsconf,
+		config:  extraConf,
 		region:  region,
+		profile: profile,
 		log:     log,
 	}
 }
@@ -1100,6 +1133,10 @@ func (s *Access) Name() string {
 
 func (s *Access) Region() string {
 	return s.region
+}
+
+func (s *Access) Profile() string {
+	return s.profile
 }
 
 func (s *Access) ResourceTypes() []string {
@@ -1114,7 +1151,7 @@ func (s *Access) ResourceTypes() []string {
 	}
 }
 
-func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Access) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -1148,7 +1185,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.access.user.sync", true) {
+	if getBool(s.config, "aws.access.user.sync", true) {
 		list, err := s.fetcher.Get("user_objects")
 		if err != nil {
 			return gph, err
@@ -1170,7 +1207,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.group.sync", true) {
+	if getBool(s.config, "aws.access.group.sync", true) {
 		list, err := s.fetcher.Get("group_objects")
 		if err != nil {
 			return gph, err
@@ -1192,7 +1229,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.role.sync", true) {
+	if getBool(s.config, "aws.access.role.sync", true) {
 		list, err := s.fetcher.Get("role_objects")
 		if err != nil {
 			return gph, err
@@ -1214,7 +1251,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.policy.sync", true) {
+	if getBool(s.config, "aws.access.policy.sync", true) {
 		list, err := s.fetcher.Get("policy_objects")
 		if err != nil {
 			return gph, err
@@ -1236,7 +1273,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.accesskey.sync", true) {
+	if getBool(s.config, "aws.access.accesskey.sync", true) {
 		list, err := s.fetcher.Get("accesskey_objects")
 		if err != nil {
 			return gph, err
@@ -1258,7 +1295,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.instanceprofile.sync", true) {
+	if getBool(s.config, "aws.access.instanceprofile.sync", true) {
 		list, err := s.fetcher.Get("instanceprofile_objects")
 		if err != nil {
 			return gph, err
@@ -1280,7 +1317,7 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.access.mfadevice.sync", true) {
+	if getBool(s.config, "aws.access.mfadevice.sync", true) {
 		list, err := s.fetcher.Get("mfadevice_objects")
 		if err != nil {
 			return gph, err
@@ -1321,38 +1358,39 @@ func (s *Access) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Access) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Access) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Access) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.access.sync", true)
+	return !getBool(s.config, "aws.access.sync", true)
 }
 
 type Storage struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	s3iface.S3API
 }
 
-func NewStorage(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewStorage(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	s3API := s3.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		s3API,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Storage{
 		S3API:   s3API,
 		fetcher: fetch.NewFetcher(awsfetch.BuildStorageFetchFuncs(fetchConfig)),
-		config:  awsconf,
+		config:  extraConf,
 		region:  region,
+		profile: profile,
 		log:     log,
 	}
 }
@@ -1365,6 +1403,10 @@ func (s *Storage) Region() string {
 	return s.region
 }
 
+func (s *Storage) Profile() string {
+	return s.profile
+}
+
 func (s *Storage) ResourceTypes() []string {
 	return []string{
 		"bucket",
@@ -1372,7 +1414,7 @@ func (s *Storage) ResourceTypes() []string {
 	}
 }
 
-func (s *Storage) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Storage) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -1406,7 +1448,7 @@ func (s *Storage) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.storage.bucket.sync", true) {
+	if getBool(s.config, "aws.storage.bucket.sync", true) {
 		list, err := s.fetcher.Get("bucket_objects")
 		if err != nil {
 			return gph, err
@@ -1428,7 +1470,7 @@ func (s *Storage) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.storage.s3object.sync", true) {
+	if getBool(s.config, "aws.storage.s3object.sync", true) {
 		list, err := s.fetcher.Get("s3object_objects")
 		if err != nil {
 			return gph, err
@@ -1469,25 +1511,25 @@ func (s *Storage) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Storage) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Storage) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Storage) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.storage.sync", true)
+	return !getBool(s.config, "aws.storage.sync", true)
 }
 
 type Messaging struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	snsiface.SNSAPI
 	sqsiface.SQSAPI
 }
 
-func NewMessaging(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewMessaging(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	snsAPI := sns.New(sess)
 	sqsAPI := sqs.New(sess)
@@ -1496,15 +1538,16 @@ func NewMessaging(sess *session.Session, awsconf config, log *logger.Logger) clo
 		snsAPI,
 		sqsAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Messaging{
 		SNSAPI:  snsAPI,
 		SQSAPI:  sqsAPI,
 		fetcher: fetch.NewFetcher(awsfetch.BuildMessagingFetchFuncs(fetchConfig)),
-		config:  awsconf,
+		config:  extraConf,
 		region:  region,
+		profile: profile,
 		log:     log,
 	}
 }
@@ -1517,6 +1560,10 @@ func (s *Messaging) Region() string {
 	return s.region
 }
 
+func (s *Messaging) Profile() string {
+	return s.profile
+}
+
 func (s *Messaging) ResourceTypes() []string {
 	return []string{
 		"subscription",
@@ -1525,7 +1572,7 @@ func (s *Messaging) ResourceTypes() []string {
 	}
 }
 
-func (s *Messaging) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Messaging) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -1559,7 +1606,7 @@ func (s *Messaging) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.messaging.subscription.sync", true) {
+	if getBool(s.config, "aws.messaging.subscription.sync", true) {
 		list, err := s.fetcher.Get("subscription_objects")
 		if err != nil {
 			return gph, err
@@ -1581,7 +1628,7 @@ func (s *Messaging) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.messaging.topic.sync", true) {
+	if getBool(s.config, "aws.messaging.topic.sync", true) {
 		list, err := s.fetcher.Get("topic_objects")
 		if err != nil {
 			return gph, err
@@ -1603,7 +1650,7 @@ func (s *Messaging) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.messaging.queue.sync", true) {
+	if getBool(s.config, "aws.messaging.queue.sync", true) {
 		list, err := s.fetcher.Get("queue_objects")
 		if err != nil {
 			return gph, err
@@ -1644,38 +1691,39 @@ func (s *Messaging) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Messaging) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Messaging) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Messaging) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.messaging.sync", true)
+	return !getBool(s.config, "aws.messaging.sync", true)
 }
 
 type Dns struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	route53iface.Route53API
 }
 
-func NewDns(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewDns(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := "global"
 	route53API := route53.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		route53API,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Dns{
 		Route53API: route53API,
 		fetcher:    fetch.NewFetcher(awsfetch.BuildDnsFetchFuncs(fetchConfig)),
-		config:     awsconf,
+		config:     extraConf,
 		region:     region,
+		profile:    profile,
 		log:        log,
 	}
 }
@@ -1688,6 +1736,10 @@ func (s *Dns) Region() string {
 	return s.region
 }
 
+func (s *Dns) Profile() string {
+	return s.profile
+}
+
 func (s *Dns) ResourceTypes() []string {
 	return []string{
 		"zone",
@@ -1695,7 +1747,7 @@ func (s *Dns) ResourceTypes() []string {
 	}
 }
 
-func (s *Dns) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Dns) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -1729,7 +1781,7 @@ func (s *Dns) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.dns.zone.sync", true) {
+	if getBool(s.config, "aws.dns.zone.sync", true) {
 		list, err := s.fetcher.Get("zone_objects")
 		if err != nil {
 			return gph, err
@@ -1751,7 +1803,7 @@ func (s *Dns) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.dns.record.sync", true) {
+	if getBool(s.config, "aws.dns.record.sync", true) {
 		list, err := s.fetcher.Get("record_objects")
 		if err != nil {
 			return gph, err
@@ -1792,38 +1844,39 @@ func (s *Dns) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Dns) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Dns) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Dns) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.dns.sync", true)
+	return !getBool(s.config, "aws.dns.sync", true)
 }
 
 type Lambda struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	lambdaiface.LambdaAPI
 }
 
-func NewLambda(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewLambda(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	lambdaAPI := lambda.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		lambdaAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Lambda{
 		LambdaAPI: lambdaAPI,
 		fetcher:   fetch.NewFetcher(awsfetch.BuildLambdaFetchFuncs(fetchConfig)),
-		config:    awsconf,
+		config:    extraConf,
 		region:    region,
+		profile:   profile,
 		log:       log,
 	}
 }
@@ -1836,13 +1889,17 @@ func (s *Lambda) Region() string {
 	return s.region
 }
 
+func (s *Lambda) Profile() string {
+	return s.profile
+}
+
 func (s *Lambda) ResourceTypes() []string {
 	return []string{
 		"function",
 	}
 }
 
-func (s *Lambda) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Lambda) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -1876,7 +1933,7 @@ func (s *Lambda) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.lambda.function.sync", true) {
+	if getBool(s.config, "aws.lambda.function.sync", true) {
 		list, err := s.fetcher.Get("function_objects")
 		if err != nil {
 			return gph, err
@@ -1917,38 +1974,39 @@ func (s *Lambda) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Lambda) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Lambda) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Lambda) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.lambda.sync", true)
+	return !getBool(s.config, "aws.lambda.sync", true)
 }
 
 type Monitoring struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	cloudwatchiface.CloudWatchAPI
 }
 
-func NewMonitoring(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewMonitoring(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	cloudwatchAPI := cloudwatch.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		cloudwatchAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Monitoring{
 		CloudWatchAPI: cloudwatchAPI,
 		fetcher:       fetch.NewFetcher(awsfetch.BuildMonitoringFetchFuncs(fetchConfig)),
-		config:        awsconf,
+		config:        extraConf,
 		region:        region,
+		profile:       profile,
 		log:           log,
 	}
 }
@@ -1961,6 +2019,10 @@ func (s *Monitoring) Region() string {
 	return s.region
 }
 
+func (s *Monitoring) Profile() string {
+	return s.profile
+}
+
 func (s *Monitoring) ResourceTypes() []string {
 	return []string{
 		"metric",
@@ -1968,7 +2030,7 @@ func (s *Monitoring) ResourceTypes() []string {
 	}
 }
 
-func (s *Monitoring) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Monitoring) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -2002,7 +2064,7 @@ func (s *Monitoring) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.monitoring.metric.sync", true) {
+	if getBool(s.config, "aws.monitoring.metric.sync", true) {
 		list, err := s.fetcher.Get("metric_objects")
 		if err != nil {
 			return gph, err
@@ -2024,7 +2086,7 @@ func (s *Monitoring) Fetch(ctx context.Context) (*graph.Graph, error) {
 			}
 		}
 	}
-	if s.config.getBool("aws.monitoring.alarm.sync", true) {
+	if getBool(s.config, "aws.monitoring.alarm.sync", true) {
 		list, err := s.fetcher.Get("alarm_objects")
 		if err != nil {
 			return gph, err
@@ -2065,38 +2127,39 @@ func (s *Monitoring) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Monitoring) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Monitoring) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Monitoring) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.monitoring.sync", true)
+	return !getBool(s.config, "aws.monitoring.sync", true)
 }
 
 type Cdn struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	cloudfrontiface.CloudFrontAPI
 }
 
-func NewCdn(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewCdn(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := "global"
 	cloudfrontAPI := cloudfront.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		cloudfrontAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Cdn{
 		CloudFrontAPI: cloudfrontAPI,
 		fetcher:       fetch.NewFetcher(awsfetch.BuildCdnFetchFuncs(fetchConfig)),
-		config:        awsconf,
+		config:        extraConf,
 		region:        region,
+		profile:       profile,
 		log:           log,
 	}
 }
@@ -2109,13 +2172,17 @@ func (s *Cdn) Region() string {
 	return s.region
 }
 
+func (s *Cdn) Profile() string {
+	return s.profile
+}
+
 func (s *Cdn) ResourceTypes() []string {
 	return []string{
 		"distribution",
 	}
 }
 
-func (s *Cdn) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Cdn) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -2149,7 +2216,7 @@ func (s *Cdn) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.cdn.distribution.sync", true) {
+	if getBool(s.config, "aws.cdn.distribution.sync", true) {
 		list, err := s.fetcher.Get("distribution_objects")
 		if err != nil {
 			return gph, err
@@ -2190,38 +2257,39 @@ func (s *Cdn) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Cdn) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Cdn) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Cdn) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.cdn.sync", true)
+	return !getBool(s.config, "aws.cdn.sync", true)
 }
 
 type Cloudformation struct {
-	fetcher fetch.Fetcher
-	region  string
-	config  config
-	log     *logger.Logger
+	fetcher         fetch.Fetcher
+	region, profile string
+	config          map[string]interface{}
+	log             *logger.Logger
 	cloudformationiface.CloudFormationAPI
 }
 
-func NewCloudformation(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func NewCloudformation(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
 	region := awssdk.StringValue(sess.Config.Region)
 	cloudformationAPI := cloudformation.New(sess)
 
 	fetchConfig := awsfetch.NewConfig(
 		cloudformationAPI,
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &Cloudformation{
 		CloudFormationAPI: cloudformationAPI,
 		fetcher:           fetch.NewFetcher(awsfetch.BuildCloudformationFetchFuncs(fetchConfig)),
-		config:            awsconf,
+		config:            extraConf,
 		region:            region,
+		profile:           profile,
 		log:               log,
 	}
 }
@@ -2234,13 +2302,17 @@ func (s *Cloudformation) Region() string {
 	return s.region
 }
 
+func (s *Cloudformation) Profile() string {
+	return s.profile
+}
+
 func (s *Cloudformation) ResourceTypes() []string {
 	return []string{
 		"stack",
 	}
 }
 
-func (s *Cloudformation) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *Cloudformation) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -2274,7 +2346,7 @@ func (s *Cloudformation) Fetch(ctx context.Context) (*graph.Graph, error) {
 
 	errc := make(chan error)
 	var wg sync.WaitGroup
-	if s.config.getBool("aws.cloudformation.stack.sync", true) {
+	if getBool(s.config, "aws.cloudformation.stack.sync", true) {
 		list, err := s.fetcher.Get("stack_objects")
 		if err != nil {
 			return gph, err
@@ -2315,11 +2387,11 @@ func (s *Cloudformation) Fetch(ctx context.Context) (*graph.Graph, error) {
 	return gph, nil
 }
 
-func (s *Cloudformation) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *Cloudformation) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
 	return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *Cloudformation) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.cloudformation.sync", true)
+	return !getBool(s.config, "aws.cloudformation.sync", true)
 }

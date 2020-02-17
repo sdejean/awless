@@ -25,6 +25,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 
 	awssdk "github.com/aws/aws-sdk-go/aws"
@@ -52,7 +53,7 @@ func TestGoTemplatingInUserdata(t *testing.T) {
 
 	awsparams := &ec2.RunInstancesInput{}
 
-	err = setFieldWithType(f.Name(), awsparams, "UserData", awsfiletobase64, map[string]string{"name": "johndoe"})
+	err = setFieldWithType(f.Name(), awsparams, "UserData", awsuserdatatobase64, map[string]string{"name": "johndoe"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +79,7 @@ func TestSetFieldWithTypeAWSFile(t *testing.T) {
 
 	awsparams := &ec2.RunInstancesInput{}
 
-	err = setFieldWithType(f.Name(), awsparams, "UserData", awsfiletobase64)
+	err = setFieldWithType(f.Name(), awsparams, "UserData", awsuserdatatobase64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,15 +166,16 @@ func TestSetFieldWithMultiType(t *testing.T) {
 			Str1, Str2 *string
 			Integer    *int64
 		}
-		MapAttribute      map[string]*string
-		EmptyMapAttribute map[string]*string
-		ParameterList     []*cloudformation.Parameter
-		PortMappings      []*ecs.PortMapping
-		SubnetMappings    []*elbv2.SubnetMapping
-		StepAdjustments   []*applicationautoscaling.StepAdjustment
-		CSVString         *string
-		SixDigitsString   *string
-		ByteSlice         []byte
+		MapAttribute          map[string]*string
+		EmptyMapAttribute     map[string]*string
+		ParameterList         []*cloudformation.Parameter
+		PortMappings          []*ecs.PortMapping
+		SubnetMappings        []*elbv2.SubnetMapping
+		LoadBalancerListeners []*elb.Listener
+		StepAdjustments       []*applicationautoscaling.StepAdjustment
+		CSVString             *string
+		SixDigitsString       *string
+		ByteSlice             []byte
 	}{Field: "initial", MapAttribute: map[string]*string{"test": awssdk.String("1234")}}
 
 	err := setFieldWithType("expected", &any, "Field", awsstr)
@@ -563,6 +565,38 @@ func TestSetFieldWithMultiType(t *testing.T) {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 
+	err = setFieldWithType([]string{"HTTP:80:UDP:8080", "HTTPS:443:TCP:12345"}, &any, "LoadBalancerListeners", awsclassicloadblisteners)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := len(any.LoadBalancerListeners), 2; got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[0].Protocol, "HTTP"; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[0].LoadBalancerPort, int64(80); got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[0].InstanceProtocol, "UDP"; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[0].InstancePort, int64(8080); got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[1].Protocol, "HTTPS"; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[1].LoadBalancerPort, int64(443); got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[1].InstanceProtocol, "TCP"; got != want {
+		t.Fatalf("got %s, want %s", got, want)
+	}
+	if got, want := *any.LoadBalancerListeners[1].InstancePort, int64(12345); got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+
 	err = setFieldWithType([]string{"0:0.25:-1", "0.75:1:+1"}, &any, "StepAdjustments", awsstepadjustments)
 	if err != nil {
 		t.Fatal(err)
@@ -640,10 +674,10 @@ func TestSetFieldWithMultiType(t *testing.T) {
 }
 
 type TestStruct struct {
-	FieldStringRequired *string   `awsName:"CloudStringRequired" awsType:"awsstr" templateName:"fstringrequired" required:""`
+	FieldStringRequired *string   `awsName:"CloudStringRequired" awsType:"awsstr" templateName:"fstringrequired"`
 	FieldString         *string   `awsName:"CloudString" awsType:"awsstr" templateName:"fstring"`
 	FieldInt64          *int64    `awsName:"CloudInt64" awsType:"awsint64" templateName:"fint"`
-	FieldBool           *bool     `awsName:"Embedded.CloudBool" awsType:"awsbool" templateName:"fbool" required:""`
+	FieldBool           *bool     `awsName:"Embedded.CloudBool" awsType:"awsbool" templateName:"fbool"`
 	FieldStringSlice    []*string `awsName:"CloudStringSlice" awsType:"awsstringslice" templateName:"fstrslice"`
 	NilField            *string   `awsName:"CloudNilString" awsType:"awsstr" templateName:"fnilstring"`
 	MultiCloudField     *int64    `awsName:"CloudField1,CloudField2" awsType:"awsint64" templateName:"fmultistring"`
@@ -670,76 +704,6 @@ func (ts *TestStruct) Validate_FieldInt64() (err error) {
 	return
 }
 
-func TestValidateStruct(t *testing.T) {
-	tcases := []struct {
-		stru        *TestStruct
-		ignored     []string
-		contains    []string
-		notContains []string
-		err         bool
-	}{
-		{
-			stru:     &TestStruct{FieldStringRequired: awssdk.String(""), FieldInt64: awssdk.Int64(12)},
-			contains: []string{"fstringrequired should not be empty", "fint should not exceed 10", "missing required field 'fbool'"},
-			err:      true,
-		},
-		{
-			stru:        &TestStruct{FieldStringRequired: awssdk.String("not empty"), FieldInt64: awssdk.Int64(12)},
-			contains:    []string{"fint should not exceed 10", "missing required field 'fbool'"},
-			notContains: []string{"fstring"},
-			err:         true,
-		},
-		{
-			stru:        &TestStruct{FieldStringRequired: awssdk.String(""), FieldInt64: awssdk.Int64(9), FieldBool: awssdk.Bool(true)},
-			contains:    []string{"fstringrequired should not be empty"},
-			notContains: []string{"fint"},
-			err:         true,
-		},
-		{
-			stru:        &TestStruct{FieldStringRequired: awssdk.String("any"), FieldInt64: awssdk.Int64(8)},
-			contains:    []string{"missing required field 'fbool'"},
-			notContains: []string{"fint", "fstringrequired"},
-			err:         true,
-		},
-		{
-			stru:        &TestStruct{FieldStringRequired: awssdk.String("any"), FieldInt64: awssdk.Int64(8), FieldString: awssdk.String("to short")},
-			contains:    []string{"fstring should be 10 chars"},
-			notContains: []string{"fint", "fstringrequired"},
-			err:         true,
-		},
-		{
-			stru: &TestStruct{FieldStringRequired: awssdk.String("non empty"), FieldInt64: awssdk.Int64(8), FieldBool: awssdk.Bool(true)},
-			err:  false,
-		},
-		{
-			stru:    &TestStruct{FieldStringRequired: awssdk.String("non empty"), FieldInt64: awssdk.Int64(8)},
-			ignored: []string{"fbool"},
-			err:     false,
-		},
-	}
-
-	for i, tcase := range tcases {
-		err := validateStruct(tcase.stru, tcase.ignored)
-		if tcase.err && err == nil {
-			t.Fatalf("%d. expected err got none", i+1)
-		}
-		if !tcase.err && err != nil {
-			t.Fatalf("%d. expected no err got one", i+1)
-		}
-		for _, msg := range tcase.contains {
-			if got, want := err.Error(), msg; !strings.Contains(got, want) {
-				t.Fatalf("%d. %q should contains %q", i+1, got, want)
-			}
-		}
-		for _, msg := range tcase.notContains {
-			if err != nil {
-				if got, want := err.Error(), msg; strings.Contains(got, want) {
-					t.Fatalf("%d. %q should not contains %q", i+1, got, want)
-				}
-			}
-		}
-	}
-}
 func TestStructDynamicSetter(t *testing.T) {
 	params := map[string]interface{}{
 		"fstringrequired": "jdoe",
@@ -805,22 +769,6 @@ func TestStructInjector(t *testing.T) {
 	if got, want := out, exp; !reflect.DeepEqual(got, want) {
 		// pretty.Print(got)
 		// pretty.Print(want)
-		t.Fatalf("\ngot %#v\n\nwant %#v\n", got, want)
-	}
-}
-
-func TestListParamsWithRequiredFlag(t *testing.T) {
-	type any struct {
-		A string `templateName:"a" required:""`
-		B string `templateName:"b" required:""`
-		C string `templateName:"c"`
-		D int    `templateName:"d"`
-	}
-	keys := structListParamsKeys(new(any))
-
-	exp := map[string]bool{"a": true, "b": true, "c": false, "d": false}
-
-	if got, want := keys, exp; !reflect.DeepEqual(got, want) {
 		t.Fatalf("\ngot %#v\n\nwant %#v\n", got, want)
 	}
 }

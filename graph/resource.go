@@ -24,6 +24,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/cloud/properties"
 	"github.com/wallix/awless/cloud/rdf"
 	tstore "github.com/wallix/triplestore"
@@ -32,9 +33,9 @@ import (
 type Resource struct {
 	kind, id string
 
-	Properties map[string]interface{}
-	Relations  map[string][]*Resource
-	Meta       map[string]interface{}
+	properties map[string]interface{}
+	relations  map[string][]*Resource
+	meta       map[string]interface{}
 }
 
 const notFoundResourceType = "notfound"
@@ -43,9 +44,9 @@ func NotFoundResource(id string) *Resource {
 	return &Resource{
 		id:         id,
 		kind:       notFoundResourceType,
-		Properties: make(map[string]interface{}),
-		Meta:       make(map[string]interface{}),
-		Relations:  make(map[string][]*Resource),
+		properties: make(map[string]interface{}),
+		meta:       make(map[string]interface{}),
+		relations:  make(map[string][]*Resource),
 	}
 }
 
@@ -53,9 +54,9 @@ func InitResource(kind, id string) *Resource {
 	return &Resource{
 		id:         id,
 		kind:       kind,
-		Properties: map[string]interface{}{properties.ID: id},
-		Meta:       make(map[string]interface{}),
-		Relations:  make(map[string][]*Resource),
+		properties: map[string]interface{}{properties.ID: id},
+		meta:       make(map[string]interface{}),
+		relations:  make(map[string][]*Resource),
 	}
 }
 
@@ -93,11 +94,11 @@ func (res *Resource) Format(layout string) (out string) {
 				}
 			case "n":
 				val = res.Id()
-				if name, ok := res.Properties[properties.Name].(string); ok && name != "" {
+				if name, ok := res.properties[properties.Name].(string); ok && name != "" {
 					val = "@" + name
 				}
 			case "p":
-				if v, ok := res.Properties[match[2]]; ok {
+				if v, ok := res.properties[match[2]]; ok {
 					val = fmt.Sprint(v)
 				}
 			default:
@@ -118,8 +119,30 @@ func (res *Resource) Id() string {
 	return res.id
 }
 
+func (res *Resource) Properties() map[string]interface{} {
+	return res.properties
+}
+
+func (res *Resource) Property(k string) (interface{}, bool) {
+	v, ok := res.properties[k]
+	return v, ok
+}
+
+func (res *Resource) Meta(k string) (interface{}, bool) {
+	v, ok := res.meta[k]
+	return v, ok
+}
+
+func (res *Resource) SetProperty(k string, v interface{}) {
+	res.properties[k] = v
+}
+
+func (res *Resource) AddRelation(typ string, rel *Resource) {
+	res.relations[typ] = append(res.relations[typ], rel)
+}
+
 // Compare only the id and type of the resources (no properties nor meta)
-func (res *Resource) Same(other *Resource) bool {
+func (res *Resource) Same(other cloud.Resource) bool {
 	if res == nil && other == nil {
 		return true
 	}
@@ -135,13 +158,13 @@ func (res *Resource) marshalFullRDF() ([]tstore.Triple, error) {
 	cloudType := namespacedResourceType(res.Type())
 	triples = append(triples, tstore.SubjPred(res.id, rdf.RdfType).Resource(cloudType))
 
-	for key, value := range res.Meta {
+	for key, value := range res.meta {
 		if key == "diff" {
 			triples = append(triples, tstore.SubjPred(res.id, MetaPredicate).StringLiteral(fmt.Sprint(value)))
 		}
 	}
 
-	for key, value := range res.Properties {
+	for key, value := range res.properties {
 		if value == nil {
 			continue
 		}
@@ -284,52 +307,52 @@ func (res *Resource) unmarshalFullRdf(gph tstore.RDFGraph) error {
 			}
 			switch dataType {
 			case rdf.RdfsClass, rdf.XsdString:
-				list, ok := res.Properties[propKey].([]string)
+				list, ok := res.properties[propKey].([]string)
 				if !ok {
 					list = []string{}
 				}
 				list = append(list, propVal.(string))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			case rdf.NetFirewallRule:
-				list, ok := res.Properties[propKey].([]*FirewallRule)
+				list, ok := res.properties[propKey].([]*FirewallRule)
 				if !ok {
 					list = []*FirewallRule{}
 				}
 				list = append(list, propVal.(*FirewallRule))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			case rdf.NetRoute:
-				list, ok := res.Properties[propKey].([]*Route)
+				list, ok := res.properties[propKey].([]*Route)
 				if !ok {
 					list = []*Route{}
 				}
 				list = append(list, propVal.(*Route))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			case rdf.Grant:
-				list, ok := res.Properties[propKey].([]*Grant)
+				list, ok := res.properties[propKey].([]*Grant)
 				if !ok {
 					list = []*Grant{}
 				}
 				list = append(list, propVal.(*Grant))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			case rdf.KeyValue:
-				list, ok := res.Properties[propKey].([]*KeyValue)
+				list, ok := res.properties[propKey].([]*KeyValue)
 				if !ok {
 					list = []*KeyValue{}
 				}
 				list = append(list, propVal.(*KeyValue))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			case rdf.DistributionOrigin:
-				list, ok := res.Properties[propKey].([]*DistributionOrigin)
+				list, ok := res.properties[propKey].([]*DistributionOrigin)
 				if !ok {
 					list = []*DistributionOrigin{}
 				}
 				list = append(list, propVal.(*DistributionOrigin))
-				res.Properties[propKey] = list
+				res.properties[propKey] = list
 			default:
 				return fmt.Errorf("unmarshalling property: unexpected datatype %s", dataType)
 			}
 		} else {
-			res.Properties[propKey] = propVal
+			res.properties[propKey] = propVal
 		}
 	}
 	return nil
@@ -341,7 +364,7 @@ func (r *Resource) unmarshalMeta(gph tstore.RDFGraph) error {
 		if err != nil {
 			return err
 		}
-		r.Meta["diff"] = text
+		r.meta["diff"] = text
 	}
 	return nil
 }

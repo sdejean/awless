@@ -21,6 +21,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -31,15 +35,19 @@ import (
 type CreateNetworkinterface struct {
 	_              string `action:"create" entity:"networkinterface" awsAPI:"ec2" awsCall:"CreateNetworkInterface" awsInput:"ec2.CreateNetworkInterfaceInput" awsOutput:"ec2.CreateNetworkInterfaceOutput" awsDryRun:""`
 	logger         *logger.Logger
+	graph          cloud.GraphAPI
 	api            ec2iface.EC2API
-	Subnet         *string   `awsName:"SubnetId" awsType:"awsstr" templateName:"subnet" required:""`
+	Subnet         *string   `awsName:"SubnetId" awsType:"awsstr" templateName:"subnet"`
 	Description    *string   `awsName:"Description" awsType:"awsstr" templateName:"description"`
 	Securitygroups []*string `awsName:"Groups" awsType:"awsstringslice" templateName:"securitygroups"`
 	Privateip      *string   `awsName:"PrivateIpAddress" awsType:"awsstr" templateName:"privateip"`
 }
 
-func (cmd *CreateNetworkinterface) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateNetworkinterface) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("subnet"), params.Opt("description", "privateip", "securitygroups")),
+		params.Validators{"privateip": params.IsIP},
+	)
 }
 
 func (cmd *CreateNetworkinterface) ExtractResult(i interface{}) string {
@@ -49,25 +57,27 @@ func (cmd *CreateNetworkinterface) ExtractResult(i interface{}) string {
 type DeleteNetworkinterface struct {
 	_      string `action:"delete" entity:"networkinterface" awsAPI:"ec2" awsCall:"DeleteNetworkInterface" awsInput:"ec2.DeleteNetworkInterfaceInput" awsOutput:"ec2.DeleteNetworkInterfaceOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	Id     *string `awsName:"NetworkInterfaceId" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"NetworkInterfaceId" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteNetworkinterface) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteNetworkinterface) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }
 
 type AttachNetworkinterface struct {
 	_           string `action:"attach" entity:"networkinterface" awsAPI:"ec2" awsCall:"AttachNetworkInterface" awsInput:"ec2.AttachNetworkInterfaceInput" awsOutput:"ec2.AttachNetworkInterfaceOutput" awsDryRun:""`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         ec2iface.EC2API
-	Id          *string `awsName:"NetworkInterfaceId" awsType:"awsstr" templateName:"id" required:""`
-	Instance    *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance" required:""`
-	DeviceIndex *int64  `awsName:"DeviceIndex" awsType:"awsint64" templateName:"device-index" required:""`
+	Id          *string `awsName:"NetworkInterfaceId" awsType:"awsstr" templateName:"id"`
+	Instance    *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance"`
+	DeviceIndex *int64  `awsName:"DeviceIndex" awsType:"awsint64" templateName:"device-index"`
 }
 
-func (cmd *AttachNetworkinterface) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachNetworkinterface) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("device-index"), params.Key("id"), params.Key("instance")))
 }
 
 func (cmd *AttachNetworkinterface) ExtractResult(i interface{}) string {
@@ -77,6 +87,7 @@ func (cmd *AttachNetworkinterface) ExtractResult(i interface{}) string {
 type DetachNetworkinterface struct {
 	_          string `action:"detach" entity:"networkinterface" awsAPI:"ec2" awsDryRun:"manual"`
 	logger     *logger.Logger
+	graph      cloud.GraphAPI
 	api        ec2iface.EC2API
 	Attachment *string `awsName:"AttachmentId" awsType:"awsstr" templateName:"attachment"`
 	Instance   *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance"`
@@ -84,14 +95,15 @@ type DetachNetworkinterface struct {
 	Force      *bool   `awsName:"Force" awsType:"awsbool" templateName:"force"`
 }
 
-func (cmd *DetachNetworkinterface) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree:   oneOf(allOf(node("instance"), node("id")), node("attachment")),
-		extras: []string{"force"},
-	}.verify(params)
+func (cmd *DetachNetworkinterface) ParamsSpec() params.Spec {
+	return params.NewSpec(params.OnlyOneOf(
+		params.AllOf(params.Key("instance"), params.Key("id")),
+		params.Key("attachment"),
+		params.Opt("force"),
+	))
 }
 
-func (cmd *DetachNetworkinterface) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *DetachNetworkinterface) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	if err := cmd.inject(params); err != nil {
 		return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 	}
@@ -100,7 +112,7 @@ func (cmd *DetachNetworkinterface) DryRun(ctx, params map[string]interface{}) (i
 	input.DryRun = Bool(true)
 
 	if cmd.Attachment != nil {
-		if err := setFieldWithType(cmd.Attachment, input, "AttachmentId", awsstr, ctx); err != nil {
+		if err := setFieldWithType(cmd.Attachment, input, "AttachmentId", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 	} else if cmd.Instance != nil && cmd.Id != nil {
@@ -115,7 +127,7 @@ func (cmd *DetachNetworkinterface) DryRun(ctx, params map[string]interface{}) (i
 	}
 
 	if cmd.Force != nil {
-		if err := setFieldWithType(cmd.Force, input, "Force", awsbool, ctx); err != nil {
+		if err := setFieldWithType(cmd.Force, input, "Force", awsbool, renv.Context()); err != nil {
 			return nil, err
 		}
 	}
@@ -133,11 +145,11 @@ func (cmd *DetachNetworkinterface) DryRun(ctx, params map[string]interface{}) (i
 	return nil, err
 }
 
-func (cmd *DetachNetworkinterface) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachNetworkinterface) ManualRun(renv env.Running) (interface{}, error) {
 	input := &ec2.DetachNetworkInterfaceInput{}
 
 	if cmd.Attachment != nil {
-		if err := setFieldWithType(cmd.Attachment, input, "AttachmentId", awsstr, ctx); err != nil {
+		if err := setFieldWithType(cmd.Attachment, input, "AttachmentId", awsstr, renv.Context()); err != nil {
 			return nil, err
 		}
 	} else if cmd.Instance != nil && cmd.Id != nil {
@@ -152,7 +164,7 @@ func (cmd *DetachNetworkinterface) ManualRun(ctx map[string]interface{}) (interf
 	}
 
 	if cmd.Force != nil {
-		if err := setFieldWithType(cmd.Force, input, "Force", awsbool, ctx); err != nil {
+		if err := setFieldWithType(cmd.Force, input, "Force", awsbool, renv.Context()); err != nil {
 			return nil, err
 		}
 	}
@@ -166,21 +178,22 @@ func (cmd *DetachNetworkinterface) ManualRun(ctx map[string]interface{}) (interf
 type CheckNetworkinterface struct {
 	_       string `action:"check" entity:"networkinterface" awsAPI:"ec2"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     ec2iface.EC2API
-	Id      *string `templateName:"id" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Id      *string `templateName:"id"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckNetworkinterface) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckNetworkinterface) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("available", "attaching", "detaching", "in-use", notFoundState),
+		})
 }
 
-func (cmd *CheckNetworkinterface) Validate_State() error {
-	return NewEnumValidator("available", "attaching", "detaching", "in-use", notFoundState).Validate(cmd.State)
-}
-
-func (cmd *CheckNetworkinterface) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckNetworkinterface) ManualRun(renv env.Running) (interface{}, error) {
 	input := &ec2.DescribeNetworkInterfacesInput{
 		NetworkInterfaceIds: []*string{cmd.Id},
 	}

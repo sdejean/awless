@@ -35,18 +35,20 @@ import (
 
 	"time"
 
-	"github.com/fxaguessy/readline"
+	"github.com/chzyer/readline"
 	"github.com/spf13/cobra"
 	"github.com/wallix/awless-scheduler/client"
 	"github.com/wallix/awless/aws/doc"
 	"github.com/wallix/awless/aws/services"
 	"github.com/wallix/awless/aws/spec"
 	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/cloud/match"
+	"github.com/wallix/awless/cloud/properties"
 	"github.com/wallix/awless/config"
-	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/logger"
 	"github.com/wallix/awless/sync"
 	"github.com/wallix/awless/template"
+	"github.com/wallix/awless/template/params"
 )
 
 var (
@@ -54,6 +56,8 @@ var (
 	scheduleRevertInFlag    string
 	runLogMessage           string
 	listRemoteTemplatesFlag bool
+	noSuggestedParamsFlag   bool
+	allSuggestedParamsFlag  bool
 )
 
 func init() {
@@ -84,7 +88,7 @@ const maxMsgLen = 140
 var runCmd = &cobra.Command{
 	Use:               "run PATH",
 	Short:             "Run a template given a filepath or URL",
-	Example:           "  awless run ~/templates/my-infra.txt\n  awless run https://raw.githubusercontent.com/wallix/awless-templates/master/create_vpc.awls\n  awless run repo:create_vpc",
+	Example:           "  awless run ~/templates/my-infra.aws\n  awless run https://raw.githubusercontent.com/wallix/awless-templates/master/create_vpc.aws\n  awless run repo:create_vpc",
 	PersistentPreRun:  applyHooks(initLoggerHook, initAwlessEnvHook, initCloudServicesHook, initSyncerHook, firstInstallDoneHook),
 	PersistentPostRun: applyHooks(verifyNewVersionHook, onVersionUpgrade, networkMonitorHook),
 
@@ -121,17 +125,17 @@ var runCmd = &cobra.Command{
 			Source:   templ.String(),
 		}
 
-		exitOn(NewRunner(tplExec.Template, tplExec.Message, tplExec.Path, config.Defaults, extraParams).Run())
+		exitOn(NewRunnerRequiredParamsOnly(tplExec.Template, tplExec.Message, tplExec.Path, config.Defaults, extraParams).Run())
 
 		return nil
 	},
 }
 
-func missingHolesStdinFunc() func(string, []string) interface{} {
+func missingHolesStdinFunc() func(string, []string, bool) string {
 	var count int
-	return func(hole string, paramPaths []string) (response interface{}) {
+	return func(hole string, paramPaths []string, optional bool) (response string) {
 		if count < 1 {
-			fmt.Println("Please specify (Ctrl+C to quit, Tab for completion):")
+			fmt.Println("Please specify " + "(" + renderYellowFn("TAB") + " for completion, " + renderYellowFn("','+TAB") + " for list completion, " + renderYellowFn("Enter") + " to skip optionals, " + renderYellowFn("Ctrl+C") + " to quit) :")
 		}
 		var docs, enums []string
 		var typedParam *awsdoc.ParamType
@@ -140,7 +144,7 @@ func missingHolesStdinFunc() func(string, []string) interface{} {
 			if len(splits) != 3 {
 				continue
 			}
-			if doc, hasDoc := awsdoc.TemplateParamsDoc(splits[0]+splits[1], splits[2]); hasDoc {
+			if doc, hasDoc := awsdoc.TemplateParamsDoc(splits[0], splits[1], splits[2]); hasDoc {
 				docs = append(docs, doc)
 			}
 			if enum, hasEnum := awsdoc.EnumDoc[param]; hasEnum {
@@ -154,7 +158,7 @@ func missingHolesStdinFunc() func(string, []string) interface{} {
 			fmt.Fprintln(os.Stderr, strings.Join(docs, "; ")+":")
 		}
 
-		autocomplete := holeAutoCompletion(allGraphsOnce.mustLoad(), hole)
+		autocomplete := holeAutoCompletion(allGraphsOnce.mustLoad(), paramPaths)
 		if typedParam != nil {
 			autocomplete = typedParamCompletionFunc(allGraphsOnce.mustLoad(), typedParam.ResourceType, typedParam.PropertyName)
 		}
@@ -163,18 +167,25 @@ func missingHolesStdinFunc() func(string, []string) interface{} {
 			autocomplete = enumCompletionFunc(enums)
 		}
 
+		var promptSuffix string
+		if optional {
+			promptSuffix = " (optional)"
+		}
 		var err error
-		for response, err = askHole(hole, autocomplete); err != nil; response, err = askHole(hole, autocomplete) {
-			logger.Errorf("invalid value: %s", err)
+		for response, err = askHole(hole, promptSuffix, autocomplete); err != nil; response, err = askHole(hole, promptSuffix, autocomplete) {
+			if optional {
+				return ""
+			}
+			logger.Error(err)
 		}
 		count++
 		return
 	}
 }
 
-func askHole(hole string, autocomplete readline.AutoCompleter) (interface{}, error) {
+func askHole(hole, promptSuffix string, autocomplete readline.AutoCompleter) (string, error) {
 	l, err := readline.NewEx(&readline.Config{
-		Prompt:          renderCyanBoldFn(hole + "? "),
+		Prompt:          renderCyanBoldFn(hole+"?") + renderYellowFn(promptSuffix) + " ",
 		AutoComplete:    autocomplete,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
@@ -197,31 +208,23 @@ func askHole(hole string, autocomplete readline.AutoCompleter) (interface{}, err
 		}
 
 		line = strings.TrimSpace(line)
-		switch {
-		case line == "":
-			return nil, errors.New("empty")
-		case !isQuoted(line) && !isCSV(line) && !template.MatchStringParamValue(line):
-			return nil, errors.New("string contains spaces or special characters: surround it with quotes")
-		default:
-			params, err := template.ParseParams(fmt.Sprintf("%s=%s", hole, line))
-			if err != nil {
-				return nil, err
-			}
-			return params[hole], nil
+		if line != "" {
+			return line, nil
 		}
+		return "", errors.New("required value")
 	}
-	return nil, nil
+	return "", errors.New("required value")
 }
 
 type onceLoader struct {
-	g    *graph.Graph
+	g    cloud.GraphAPI
 	err  error
 	once stdsync.Once
 }
 
-func (l *onceLoader) mustLoad() *graph.Graph {
+func (l *onceLoader) mustLoad() cloud.GraphAPI {
 	l.once.Do(func() {
-		l.g, l.err = sync.LoadLocalGraphs(config.GetAWSRegion())
+		l.g, l.err = sync.LoadLocalGraphs(config.GetAWSProfile(), config.GetAWSRegion())
 	})
 	exitOn(l.err)
 	return l.g
@@ -244,7 +247,7 @@ func createDriverCommands(action string, entities []string) *cobra.Command {
 
 			invalidEntityErr := fmt.Errorf("invalid entity '%s'", args[0])
 
-			_, resources := resolveResourceFromRefInCurrentRegion(args[0])
+			_, resources, matchingProperty := resolveResourceFromRefInCurrentRegion(args[0])
 			if len(resources) != 1 {
 				return invalidEntityErr
 			}
@@ -253,7 +256,7 @@ func createDriverCommands(action string, entities []string) *cobra.Command {
 			if !ok {
 				return invalidEntityErr
 			}
-			templ, err := suggestFixParsingError(templDef, args, invalidEntityErr)
+			templ, err := suggestFixParsingError(templDef, args, matchingProperty, invalidEntityErr)
 			exitOn(err)
 
 			tplExec := &template.TemplateExecution{
@@ -279,7 +282,11 @@ func createDriverCommands(action string, entities []string) *cobra.Command {
 
 				templ, err := template.Parse(text)
 				if err != nil {
-					templ, err = suggestFixParsingError(def, args, err)
+					_, resources, matchingProperty := resolveResourceFromRefInCurrentRegion(args[0])
+					if len(resources) != 1 {
+						exitOn(err)
+					}
+					templ, err = suggestFixParsingError(def, args, matchingProperty, err)
 					exitOn(err)
 				}
 
@@ -299,47 +306,46 @@ func createDriverCommands(action string, entities []string) *cobra.Command {
 			apiStr = fmt.Sprint(strings.ToUpper(api) + " ")
 		}
 
-		var requiredStr bytes.Buffer
-		if len(templDef.RequiredParams) > 0 {
-			requiredStr.WriteString("\n\tRequired params:")
-			for _, req := range templDef.RequiredParams {
-				requiredStr.WriteString(fmt.Sprintf("\n\t\t- %s", req))
-				if d, ok := awsdoc.TemplateParamsDoc(templDef.Action+templDef.Entity, req); ok {
-					requiredStr.WriteString(fmt.Sprintf(": %s", d))
-				}
+		var paramsStr bytes.Buffer
+		allParams, optParams, _ := params.List(templDef.Params)
+		tab := tabwriter.NewWriter(&paramsStr, 0, 0, 3, '.', 0)
+		for _, p := range allParams {
+			fmt.Fprintf(tab, "  %s\t", p)
+			if d, ok := awsdoc.TemplateParamsDocWithEnums(templDef.Action, templDef.Entity, p); ok {
+				fmt.Fprintf(tab, " %s", d)
 			}
+			fmt.Fprintln(tab)
 		}
-
-		var extraStr bytes.Buffer
-		if len(templDef.ExtraParams) > 0 {
-			extraStr.WriteString("\n\tExtra params:")
-			for _, ext := range templDef.ExtraParams {
-				extraStr.WriteString(fmt.Sprintf("\n\t\t- %s", ext))
-				if d, ok := awsdoc.TemplateParamsDoc(templDef.Action+templDef.Entity, ext); ok {
-					extraStr.WriteString(fmt.Sprintf(": %s", d))
-				}
+		for _, p := range optParams {
+			fmt.Fprintf(tab, "  [%s]\t", p)
+			if d, ok := awsdoc.TemplateParamsDocWithEnums(templDef.Action, templDef.Entity, p); ok {
+				fmt.Fprintf(tab, " %s", d)
 			}
+			fmt.Fprintln(tab)
 		}
+		tab.Flush()
 
 		var validArgs []string
-		for _, param := range templDef.RequiredParams {
+		for _, param := range append(allParams, optParams...) {
 			validArgs = append(validArgs, param+"=")
 		}
-		for _, param := range templDef.ExtraParams {
-			validArgs = append(validArgs, param+"=")
+		currentCmd := &cobra.Command{
+			Use:               fmt.Sprintf("%s [param=value ...]", templDef.Entity),
+			PersistentPreRun:  applyHooks(initLoggerHook, initAwlessEnvHook, initCloudServicesHook, initSyncerHook, firstInstallDoneHook),
+			PersistentPostRun: applyHooks(verifyNewVersionHook, onVersionUpgrade, networkMonitorHook),
+			Short:             awsdoc.AwlessCommandDefinitionsDoc(action, templDef.Entity, fmt.Sprintf("%s a %s%s", strings.Title(action), apiStr, templDef.Entity)),
+			Long:              fmt.Sprintf("PARAMS:\n%s\nPARAMS PATTERNS:\n  %s\n\nSEE ALSO:\n%s", paramsStr.String(), templDef.Params, availableActionsForEntity(templDef.Entity)),
+			Example:           awsdoc.AwlessExamplesDoc(action, templDef.Entity),
+			RunE:              run(templDef),
+			ValidArgs:         validArgs,
 		}
-		actionCmd.AddCommand(
-			&cobra.Command{
-				Use:               templDef.Entity,
-				PersistentPreRun:  applyHooks(initLoggerHook, initAwlessEnvHook, initCloudServicesHook, initSyncerHook, firstInstallDoneHook),
-				PersistentPostRun: applyHooks(verifyNewVersionHook, onVersionUpgrade, networkMonitorHook),
-				Short:             fmt.Sprintf("%s a %s%s", strings.Title(action), apiStr, templDef.Entity),
-				Long:              fmt.Sprintf("%s a %s%s%s%s", strings.Title(templDef.Action), apiStr, templDef.Entity, requiredStr.String(), extraStr.String()),
-				Example:           awsdoc.AwlessExamplesDoc(action, templDef.Entity),
-				RunE:              run(templDef),
-				ValidArgs:         validArgs,
-			},
-		)
+		currentCmd.SetUsageTemplate(customCommandUsageTemplate)
+		currentCmd.SetHelpTemplate(`{{with .Short}}{{. | trimTrailingWhitespaces}}
+{{end}}{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}`)
+		currentCmd.Flags().BoolVar(&noSuggestedParamsFlag, "prompt-only-required", false, "Prompt only required parameters")
+		currentCmd.Flags().BoolVarP(&allSuggestedParamsFlag, "prompt-all", "a", false, "Prompt all non-provided parameters")
+
+		actionCmd.AddCommand(currentCmd)
 	}
 
 	return actionCmd
@@ -369,46 +375,74 @@ func runSyncFor(tplExec *template.TemplateExecution) {
 	}
 }
 
-func resolveAliasFunc(entity, key, alias string) string {
-	gph, err := sync.LoadLocalGraphs(config.GetAWSRegion())
+func resolveAliasFunc(paramPath, alias string) string {
+	splits := strings.Split(paramPath, ".")
+	if len(splits) != 3 {
+		logger.Errorf("resolve alias: invalid param path: %s", paramPath)
+		return ""
+	}
+	entity, key := splits[1], splits[2]
+	var typedParam *awsdoc.ParamType
+	if tparam, has := awsdoc.ParamTypeDoc[paramPath]; has {
+		typedParam = tparam
+	}
+
+	gph, err := sync.LoadLocalGraphs(config.GetAWSProfile(), config.GetAWSRegion())
 	if err != nil {
 		fmt.Printf("resolve alias '%s': cannot load local graphs for region %s: %s\n", alias, config.GetAWSRegion(), err)
 		return ""
 	}
 	resType := key
-	if strings.Contains(key, "id") {
-		resType = entity
+	if typedParam != nil {
+		resType = typedParam.ResourceType
+	} else {
+		if strings.Contains(key, "id") {
+			resType = entity
+		}
 	}
 
-	resources, err := gph.ResolveResources(&graph.And{Resolvers: []graph.Resolver{&graph.ByProperty{Key: "Name", Value: alias}, &graph.ByType{Typ: resType}}})
+	resources, err := gph.Find(cloud.NewQuery(resType).Match(match.And(match.Property("Name", alias))))
 	if err != nil {
 		return ""
 	}
+	var matchingResource cloud.Resource
 	switch len(resources) {
 	case 1:
-		return resources[0].Id()
+		matchingResource = resources[0]
 	default:
-		resources, err := gph.ResolveResources(&graph.And{Resolvers: []graph.Resolver{&graph.ByProperty{Key: "Name", Value: alias}}})
+		resources, err := gph.FindWithProperties(map[string]interface{}{"Name": alias})
 		if err != nil {
 			return ""
 		}
 		if len(resources) > 0 {
-			return resources[0].Id()
+			matchingResource = resources[0]
+		}
+	}
+	if matchingResource == nil {
+		return ""
+	}
+	if typedParam != nil {
+		if prop, ok := matchingResource.Properties()[typedParam.PropertyName].(string); ok {
+			return prop
 		}
 	}
 
-	return ""
+	return matchingResource.Id()
 }
 
-func sprintProcessedParams(processed map[string]interface{}) string {
-	if len(processed) == 0 {
-		return "<none>"
+func availableActionsForEntity(entity string) string {
+	var out []string
+	for actionentity, _ := range awsspec.APIPerTemplateDefName {
+		if strings.HasSuffix(actionentity, entity) {
+			index := strings.Index(actionentity, entity)
+			out = append(out, fmt.Sprintf("  %s %s", actionentity[:index], actionentity[index:]))
+		}
 	}
-	var str []string
-	for k, v := range processed {
-		str = append(str, fmt.Sprintf("%s=%v", k, v))
+	if len(out) > 0 {
+		sort.Strings(out)
+		return strings.Join(out, "\n")
 	}
-	return strings.Join(str, ", ")
+	return "none"
 }
 
 func oneLinerShortDesc(action string, entities []string) string {
@@ -583,21 +617,19 @@ func scheduleTemplate(t *template.Template, runIn, revertIn string) error {
 	return nil
 }
 
-func suggestFixParsingError(def awsspec.Definition, args []string, defaultErr error) (*template.Template, error) {
-	if len(def.RequiredParams) != 1 || len(args) != 1 {
+func suggestFixParsingError(def awsspec.Definition, args []string, matchingProperty string, defaultErr error) (*template.Template, error) {
+	if len(def.Params.Required()) != 1 || len(args) != 1 {
 		return nil, defaultErr
 	}
-
-	suggestText := fmt.Sprintf("%s %s %s=%s", def.Action, def.Entity, def.RequiredParams[0], args[0])
-
-	fmt.Printf("Did you mean `awless %s` (y/n)? ", suggestText)
-	var yesorno string
-	_, err := fmt.Scanln(&yesorno)
-	if err != nil {
-		return nil, defaultErr
+	propKey := def.Params.Required()[0]
+	propValue := args[0]
+	if matchingProperty == properties.Name && !strings.HasPrefix(propValue, "@") && !strings.HasSuffix(propKey, "name") {
+		propValue = "@" + propValue
 	}
 
-	if yesorno = strings.ToLower(strings.TrimSpace(yesorno)); !(yesorno == "y" || yesorno == "yes") {
+	suggestText := fmt.Sprintf("%s %s %s=%s", def.Action, def.Entity, propKey, propValue)
+
+	if !promptConfirmDefaultYes("Did you mean `awless %s` ? ", suggestText) {
 		return nil, defaultErr
 	}
 
@@ -625,4 +657,42 @@ func joinSentence(arr []string) string {
 		return fmt.Sprintf("%s and %s", strings.Join(arr[:ln-1], sep), arr[ln-1])
 	}
 	return strings.Join(arr, sep)
+}
+
+const customCommandUsageTemplate = `
+USAGE:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+ALIASES:
+  {{.NameAndAliases}}{{end}}{{if .HasExample}}
+
+EXAMPLES:
+{{.Example}}{{end}}
+
+{{.Long}}{{if .HasAvailableSubCommands}}
+
+AVAILABLE COMMANDS:{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+FLAGS:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
+
+GLOBAL FLAGS:
+{{.InheritedFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasHelpSubCommands}}
+
+Additional help topics:{{range .Commands}}{{if .IsAdditionalHelpTopicCommand}}
+  {{rpad .CommandPath .CommandPathPadding}} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableSubCommands}}
+
+Use "{{.CommandPath}} [command] --help" for more information about a command.{{end}}
+`
+
+func promptConfirmDefaultYes(msg string, a ...interface{}) bool {
+	var yesorno string
+	fmt.Fprintf(os.Stderr, "%s [Y/n] ", fmt.Sprintf(msg, a...))
+	fmt.Scanln(&yesorno)
+	if y := strings.TrimSpace(strings.ToLower(yesorno)); y == "y" || y == "yes" || y == "" {
+		return true
+	}
+	return false
 }

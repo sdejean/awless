@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/env"
 )
 
 type Runner struct {
@@ -13,10 +14,11 @@ type Runner struct {
 	Locale, Profile, Message, TemplatePath string
 	Log                                    *logger.Logger
 	Fillers                                []map[string]interface{}
-	AliasFunc                              func(entity, key, alias string) string
-	MissingHolesFunc                       func(string, []string) interface{}
+	AliasFunc                              func(paramPath, alias string) string
+	MissingHolesFunc                       func(string, []string, bool) string
 	CmdLookuper                            func(tokens ...string) interface{}
 	Validators                             []Validator
+	ParamsSuggested                        int
 
 	BeforeRun func(*TemplateExecution) (bool, error)
 	AfterRun  func(*TemplateExecution) error
@@ -32,20 +34,17 @@ func (ru *Runner) Run() error {
 	}
 	tplExec.SetMessage(ru.Message)
 
-	env := NewEnv()
-	env.Log = ru.Log
-	env.AddFillers(ru.Fillers...)
-	env.AliasFunc = ru.AliasFunc
-	env.MissingHolesFunc = ru.MissingHolesFunc
-	env.Lookuper = ru.CmdLookuper
+	cenv := NewEnv().WithAliasFunc(ru.AliasFunc).WithMissingHolesFunc(ru.MissingHolesFunc).
+		WithLookupCommandFunc(ru.CmdLookuper).WithLog(ru.Log).WithParamsMode(ru.ParamsSuggested).Build()
+	cenv.Push(env.FILLERS, ru.Fillers...)
 
 	var err error
-	tplExec.Template, env, err = Compile(tplExec.Template, env, NewRunnerCompileMode)
+	tplExec.Template, cenv, err = Compile(tplExec.Template, cenv, NewRunnerCompileMode)
 	if err != nil {
 		return err
 	}
 
-	tplExec.Fillers = env.GetProcessedFillers()
+	tplExec.Fillers = cenv.Get(env.PROCESSED_FILLERS)
 
 	errs := tplExec.Template.Validate(ru.Validators...)
 	if len(errs) > 0 {
@@ -61,8 +60,8 @@ func (ru *Runner) Run() error {
 		logger.Info("Dry running template ...")
 	}
 
-	env.IsDryRun = true
-	if _, err = tplExec.Template.Run(env); err != nil {
+	renv := NewRunEnv(cenv)
+	if _, err = tplExec.Template.DryRun(renv); err != nil {
 		switch t := err.(type) {
 		case *Errors:
 			errs, _ := t.Errors()
@@ -74,7 +73,6 @@ func (ru *Runner) Run() error {
 		}
 		return errors.New("Dry run failed")
 	}
-	env.IsDryRun = false
 
 	ok, err := ru.BeforeRun(tplExec)
 	if err != nil {
@@ -82,7 +80,7 @@ func (ru *Runner) Run() error {
 	}
 
 	if ok {
-		tplExec.Template, err = tplExec.Template.Run(env)
+		tplExec.Template, err = tplExec.Template.Run(renv)
 		if err != nil {
 			logger.Errorf("Running template error: %s", err)
 		}

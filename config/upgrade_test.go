@@ -38,7 +38,7 @@ func TestUpgradeMessaging(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	exp := fmt.Sprintf("New version 1000.0.0 available. Changelog at https://github.com/wallix/awless/blob/master/CHANGELOG.md\nRun `wget -O awless-1000.0.0.tar.gz https://github.com/wallix/awless/releases/download/1000.0.0/awless-%s-%s.tar.gz`\n", runtime.GOOS, runtime.GOARCH)
+	exp := fmt.Sprintf("New version 1000.0.0 available. Checkout the latest features at https://github.com/wallix/awless/blob/master/CHANGELOG.md\nRun `wget -O awless-1000.0.0.tar.gz https://github.com/wallix/awless/releases/download/1000.0.0/awless-%s-%s.tar.gz`\n", runtime.GOOS, runtime.GOARCH)
 	if got, want := buff.String(), exp; got != want {
 		t.Fatalf("got %s, want %s", got, want)
 	}
@@ -78,6 +78,8 @@ func TestSemverUpgradeOrNot(t *testing.T) {
 
 		{current: "1.1.0", latest: "1.1.1", exp: true, revert: false},
 		{current: "2.1.5", latest: "2.2.0", exp: true, revert: false},
+
+		{current: "0.1.9", latest: "0.1.10", exp: true, revert: false},
 	}
 
 	for _, tc := range tcases {

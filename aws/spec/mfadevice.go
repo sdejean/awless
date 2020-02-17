@@ -24,12 +24,16 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/iam/iamiface"
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
+	"github.com/chzyer/readline"
 	"github.com/fatih/color"
-	"github.com/fxaguessy/readline"
 	"github.com/wallix/awless/aws/config"
 	"github.com/wallix/awless/logger"
 )
@@ -37,15 +41,16 @@ import (
 type CreateMfadevice struct {
 	_      string `action:"create" entity:"mfadevice" awsAPI:"iam"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `templateName:"name" required:""`
+	Name   *string `templateName:"name"`
 }
 
-func (cmd *CreateMfadevice) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateMfadevice) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
-func (cmd *CreateMfadevice) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CreateMfadevice) ManualRun(renv env.Running) (interface{}, error) {
 	name := StringValue(cmd.Name)
 	input := &iam.CreateVirtualMFADeviceInput{
 		VirtualMFADeviceName: cmd.Name,
@@ -85,12 +90,13 @@ func (cmd *CreateMfadevice) ExtractResult(i interface{}) string {
 type DeleteMfadevice struct {
 	_      string `action:"delete" entity:"mfadevice" awsAPI:"iam" awsCall:"DeleteVirtualMFADevice" awsInput:"iam.DeleteVirtualMFADeviceInput" awsOutput:"iam.DeleteVirtualMFADeviceOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Id     *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteMfadevice) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteMfadevice) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }
 
 var (
@@ -100,19 +106,22 @@ var (
 type AttachMfadevice struct {
 	_        string `action:"attach" entity:"mfadevice" awsAPI:"iam" awsCall:"EnableMFADevice" awsInput:"iam.EnableMFADeviceInput" awsOutput:"iam.EnableMFADeviceOutput"`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      iamiface.IAMAPI
-	Id       *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id" required:""`
-	User     *string `awsName:"UserName" awsType:"awsstr" templateName:"user" required:""`
-	MfaCode1 *string `awsName:"AuthenticationCode1" awsType:"aws6digitsstring" templateName:"mfa-code-1" required:""`
-	MfaCode2 *string `awsName:"AuthenticationCode2" awsType:"aws6digitsstring" templateName:"mfa-code-2" required:""`
+	Id       *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id"`
+	User     *string `awsName:"UserName" awsType:"awsstr" templateName:"user"`
+	MfaCode1 *string `awsName:"AuthenticationCode1" awsType:"aws6digitsstring" templateName:"mfa-code-1"`
+	MfaCode2 *string `awsName:"AuthenticationCode2" awsType:"aws6digitsstring" templateName:"mfa-code-2"`
 	NoPrompt *bool   `templateName:"no-prompt"`
 }
 
-func (cmd *AttachMfadevice) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachMfadevice) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"), params.Key("mfa-code-1"), params.Key("mfa-code-2"), params.Key("user"),
+		params.Opt("no-prompt"),
+	))
 }
 
-func (cmd *AttachMfadevice) AfterRun(ctx map[string]interface{}, output interface{}) error {
+func (cmd *AttachMfadevice) AfterRun(renv env.Running, output interface{}) error {
 	if !BoolValue(cmd.NoPrompt) {
 		if promptConfirm("\nDo you want to create a profile for this MFA device in %s?", awsConfigFilepath) {
 			roleArn, err := promptRole(cmd.api)
@@ -155,13 +164,14 @@ func (cmd *AttachMfadevice) AfterRun(ctx map[string]interface{}, output interfac
 type DetachMfadevice struct {
 	_      string `action:"detach" entity:"mfadevice" awsAPI:"iam" awsCall:"DeactivateMFADevice" awsInput:"iam.DeactivateMFADeviceInput" awsOutput:"iam.DeactivateMFADeviceOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Id     *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id" required:""`
-	User   *string `awsName:"UserName" awsType:"awsstr" templateName:"user" required:""`
+	Id     *string `awsName:"SerialNumber" awsType:"awsstr" templateName:"id"`
+	User   *string `awsName:"UserName" awsType:"awsstr" templateName:"user"`
 }
 
-func (cmd *DetachMfadevice) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachMfadevice) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"), params.Key("user")))
 }
 
 func displayQRCode(w io.Writer, qrCode barcode.Barcode) {

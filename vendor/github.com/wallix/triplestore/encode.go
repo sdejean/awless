@@ -38,8 +38,10 @@ var RDFContext = &Context{
 type wordLength uint32
 
 const (
-	resourceTypeEncoding = uint8(0)
-	literalTypeEncoding  = uint8(1)
+	resourceTypeEncoding    = uint8(0)
+	literalTypeEncoding     = uint8(1)
+	bnodeTypeEncoding       = uint8(2)
+	literalWithLangEncoding = uint8(3)
 )
 
 type binaryEncoder struct {
@@ -98,6 +100,8 @@ func (enc *binaryEncoder) writeTriple(t Triple, buf *bytes.Buffer) error {
 func encodeBinTriple(t Triple, buff *bytes.Buffer) error {
 	sub, pred := t.Subject(), t.Predicate()
 
+	binary.Write(buff, binary.BigEndian, t.(*triple).isSubBnode)
+
 	binary.Write(buff, binary.BigEndian, wordLength(len(sub)))
 	buff.WriteString(sub)
 
@@ -106,14 +110,27 @@ func encodeBinTriple(t Triple, buff *bytes.Buffer) error {
 
 	obj := t.Object()
 	if lit, isLit := obj.Literal(); isLit {
-		binary.Write(buff, binary.BigEndian, literalTypeEncoding)
-		typ := lit.Type()
-		binary.Write(buff, binary.BigEndian, wordLength(len(typ)))
-		buff.WriteString(string(typ))
+		if lang := lit.Lang(); len(lang) > 0 {
+			binary.Write(buff, binary.BigEndian, literalWithLangEncoding)
+			binary.Write(buff, binary.BigEndian, wordLength(len(lang)))
+			buff.WriteString(string(lang))
+		} else {
+			binary.Write(buff, binary.BigEndian, literalTypeEncoding)
+			typ := lit.Type()
+			binary.Write(buff, binary.BigEndian, wordLength(len(typ)))
+			buff.WriteString(string(typ))
+		}
 
 		litVal := lit.Value()
+		if lit.Type() == XsdString {
+			litVal = escapeStringLiteral(litVal)
+		}
 		binary.Write(buff, binary.BigEndian, wordLength(len(litVal)))
 		buff.WriteString(litVal)
+	} else if bnode, isBnode := obj.Bnode(); isBnode {
+		binary.Write(buff, binary.BigEndian, bnodeTypeEncoding)
+		binary.Write(buff, binary.BigEndian, wordLength(len(bnode)))
+		buff.WriteString(bnode)
 	} else {
 		binary.Write(buff, binary.BigEndian, resourceTypeEncoding)
 		res, _ := obj.Resource()
@@ -182,19 +199,19 @@ func encodeNTriple(t Triple, ctx *Context, buff *bytes.Buffer) {
 	}
 	buff.WriteString(sub + " <" + buildIRI(ctx, t.Predicate()) + "> ")
 
-	if obj := t.Object().(object); obj.isBnode {
-		buff.WriteString("_:" + obj.bnode)
+	if bnode, isBnode := t.Object().Bnode(); isBnode {
+		buff.WriteString("_:" + bnode)
 	} else {
 		if rid, ok := t.Object().Resource(); ok {
 			buff.WriteString("<" + buildIRI(ctx, rid) + ">")
 		} else if lit, ok := t.Object().Literal(); ok {
 			if lit.Lang() != "" {
-				buff.WriteString("\"" + lit.Value() + "\"@" + lit.Lang())
+				buff.WriteString("\"" + escapeStringLiteral(lit.Value()) + "\"@" + lit.Lang())
 			} else {
 				switch lit.Type() {
 				case XsdString:
 					// namespace empty as per spec
-					buff.WriteString("\"" + lit.Value() + "\"")
+					buff.WriteString("\"" + escapeStringLiteral(lit.Value()) + "\"")
 				default:
 					if ctx != nil {
 						if _, ok := ctx.Prefixes["xsd"]; ok {
@@ -285,4 +302,10 @@ func (dg *dotGraphEncoder) Encode(tris ...Triple) error {
 	fmt.Fprintf(dg.w, "}")
 
 	return nil
+}
+
+var escaper = strings.NewReplacer("\n", "\\n", "\r", "\\r")
+
+func escapeStringLiteral(s string) string {
+	return escaper.Replace(s)
 }

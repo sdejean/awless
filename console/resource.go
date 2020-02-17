@@ -21,21 +21,21 @@ import (
 	"io"
 
 	"github.com/olekukonko/tablewriter"
-	"github.com/wallix/awless/graph"
+	"github.com/wallix/awless/cloud"
 )
 
 type tableResourceDisplayer struct {
 	maxwidth          int
-	r                 *graph.Resource
+	r                 cloud.Resource
 	columnDefinitions []ColumnDefinition
 }
 
 func (d *tableResourceDisplayer) Print(w io.Writer) error {
-	values := make(table, len(d.r.Properties))
+	values := make(table, len(d.r.Properties()))
 
 	i := 0
 	propertyNameMaxWith := 13
-	for prop, val := range d.r.Properties {
+	for prop, val := range d.r.Properties() {
 		var header ColumnDefinition
 		for _, h := range d.columnDefinitions {
 			if h.propKey() == prop {
@@ -85,6 +85,6 @@ func (d *tableResourceDisplayer) Print(w io.Writer) error {
 	return nil
 }
 
-func (d *tableResourceDisplayer) SetResource(r *graph.Resource) {
+func (d *tableResourceDisplayer) SetResource(r cloud.Resource) {
 	d.r = r
 }

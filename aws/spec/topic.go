@@ -19,18 +19,21 @@ import (
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/sns"
 	"github.com/aws/aws-sdk-go/service/sns/snsiface"
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/params"
 )
 
 type CreateTopic struct {
 	_      string `action:"create" entity:"topic" awsAPI:"sns" awsCall:"CreateTopic" awsInput:"sns.CreateTopicInput" awsOutput:"sns.CreateTopicOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    snsiface.SNSAPI
-	Name   *string `awsName:"Name" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"Name" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *CreateTopic) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateTopic) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 func (cmd *CreateTopic) ExtractResult(i interface{}) string {
@@ -40,10 +43,11 @@ func (cmd *CreateTopic) ExtractResult(i interface{}) string {
 type DeleteTopic struct {
 	_      string `action:"delete" entity:"topic" awsAPI:"sns" awsCall:"DeleteTopic" awsInput:"sns.DeleteTopicInput" awsOutput:"sns.DeleteTopicOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    snsiface.SNSAPI
-	Id     *string `awsName:"TopicArn" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"TopicArn" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteTopic) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteTopic) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }

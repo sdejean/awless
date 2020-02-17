@@ -23,6 +23,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/aws/aws-sdk-go/service/ecr/ecriface"
@@ -32,17 +36,18 @@ import (
 type AuthenticateRegistry struct {
 	_                string `action:"authenticate" entity:"registry" awsAPI:"ecr"`
 	logger           *logger.Logger
+	graph            cloud.GraphAPI
 	api              ecriface.ECRAPI
 	Accounts         []*string `templateName:"accounts"`
 	NoConfirm        *bool     `templateName:"no-confirm"`
 	DisableDockerCmd *bool     `templateName:"no-docker-login"`
 }
 
-func (cmd *AuthenticateRegistry) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AuthenticateRegistry) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AtLeastOneOf(params.Key("accounts"), params.Key("no-confirm"), params.Key("no-docker-login")))
 }
 
-func (cmd *AuthenticateRegistry) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AuthenticateRegistry) ManualRun(renv env.Running) (interface{}, error) {
 	input := &ecr.GetAuthorizationTokenInput{}
 	var err error
 

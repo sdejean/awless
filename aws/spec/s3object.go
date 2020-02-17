@@ -16,10 +16,13 @@ limitations under the License.
 package awsspec
 
 import (
-	"fmt"
 	"mime"
 	"os"
 	"path/filepath"
+
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
@@ -31,33 +34,22 @@ import (
 type CreateS3object struct {
 	_      string `action:"create" entity:"s3object" awsAPI:"s3"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    s3iface.S3API
-	Bucket *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket" required:""`
-	File   *string `awsName:"Body" awsType:"awsstr" templateName:"file" required:""`
+	Bucket *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket"`
+	File   *string `awsName:"Body" awsType:"awsstr" templateName:"file"`
 	Name   *string `awsName:"Key" awsType:"awsstr" templateName:"name"`
 	Acl    *string `awsName:"ACL" awsType:"awsstr" templateName:"acl"`
 }
 
-func (cmd *CreateS3object) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateS3object) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("bucket"), params.Key("file"), params.Opt("acl", "name")),
+		params.Validators{"file": params.IsFilepath},
+	)
 }
 
-func (cmd *CreateS3object) Validate_File() error {
-	filepath := StringValue(cmd.File)
-	stat, err := os.Stat(filepath)
-	if os.IsNotExist(err) {
-		return fmt.Errorf("cannot find file '%s'", filepath)
-	}
-	if err != nil {
-		return err
-	}
-	if stat.IsDir() {
-		return fmt.Errorf("'%s' is a directory", filepath)
-	}
-	return nil
-}
-
-func (cmd *CreateS3object) ManualRun(map[string]interface{}) (interface{}, error) {
+func (cmd *CreateS3object) ManualRun(env.Running) (interface{}, error) {
 	input := &s3.PutObjectInput{}
 
 	f, err := os.Open(StringValue(cmd.File))
@@ -112,27 +104,31 @@ func (cmd *CreateS3object) ExtractResult(i interface{}) string {
 type UpdateS3object struct {
 	_       string `action:"update" entity:"s3object" awsAPI:"s3" awsCall:"PutObjectAcl" awsInput:"s3.PutObjectAclInput" awsOutput:"s3.PutObjectAclOutput"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     s3iface.S3API
-	Bucket  *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket" required:""`
-	Name    *string `awsName:"Key" awsType:"awsstr" templateName:"name" required:""`
-	Acl     *string `awsName:"ACL" awsType:"awsstr" templateName:"acl" required:""`
+	Bucket  *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket"`
+	Name    *string `awsName:"Key" awsType:"awsstr" templateName:"name"`
+	Acl     *string `awsName:"ACL" awsType:"awsstr" templateName:"acl"`
 	Version *string `awsName:"VersionId" awsType:"awsstr" templateName:"version"`
 }
 
-func (cmd *UpdateS3object) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *UpdateS3object) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("acl"), params.Key("bucket"), params.Key("name"),
+		params.Opt("version"),
+	))
 }
 
 type DeleteS3object struct {
 	_      string `action:"delete" entity:"s3object" awsAPI:"s3" awsCall:"DeleteObject" awsInput:"s3.DeleteObjectInput" awsOutput:"s3.DeleteObjectOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    s3iface.S3API
-	Bucket *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket" required:""`
-	Name   *string `awsName:"Key" awsType:"awsstr" templateName:"name" required:""`
+	Bucket *string `awsName:"Bucket" awsType:"awsstr" templateName:"bucket"`
+	Name   *string `awsName:"Key" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DeleteS3object) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteS3object) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("bucket"), params.Key("name")))
 }
 
 type ProgressReadSeeker struct {

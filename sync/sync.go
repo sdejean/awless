@@ -1,12 +1,9 @@
 /*
 Copyright 2017 WALLIX
-
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
-
     http://www.apache.org/licenses/LICENSE-2.0
-
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -20,7 +17,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,20 +25,19 @@ import (
 
 	"runtime"
 
-	"github.com/wallix/awless/aws/services"
 	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/logger"
 	"github.com/wallix/awless/sync/repo"
 )
 
-const fileExt = ".triples"
+const fileExt = ".nt"
 
 var DefaultSyncer Syncer
 
 type Syncer interface {
 	repo.Repo
-	Sync(...cloud.Service) (map[string]*graph.Graph, error)
+	Sync(...cloud.Service) (map[string]cloud.GraphAPI, error)
 }
 
 type noopsyncer struct {
@@ -51,8 +46,8 @@ type noopsyncer struct {
 
 func NoOpSyncer() Syncer { return new(noopsyncer) }
 
-func (s *noopsyncer) Sync(services ...cloud.Service) (map[string]*graph.Graph, error) {
-	return map[string]*graph.Graph{}, nil
+func (s *noopsyncer) Sync(services ...cloud.Service) (map[string]cloud.GraphAPI, error) {
+	return map[string]cloud.GraphAPI{}, nil
 }
 
 type syncer struct {
@@ -77,12 +72,12 @@ func NewSyncer(l ...*logger.Logger) Syncer {
 	return s
 }
 
-func (s *syncer) Sync(services ...cloud.Service) (map[string]*graph.Graph, error) {
+func (s *syncer) Sync(services ...cloud.Service) (map[string]cloud.GraphAPI, error) {
 	var workers gosync.WaitGroup
 
 	type result struct {
 		service cloud.Service
-		gph     *graph.Graph
+		gph     cloud.GraphAPI
 		start   time.Time
 		err     error
 	}
@@ -109,7 +104,7 @@ func (s *syncer) Sync(services ...cloud.Service) (map[string]*graph.Graph, error
 	}()
 
 	var allErrors []error
-	graphs := make(map[string]*graph.Graph)
+	graphs := make(map[string]cloud.GraphAPI)
 	servicesByName := make(map[string]cloud.Service)
 Loop:
 	for {
@@ -136,24 +131,35 @@ Loop:
 
 	for name, g := range graphs {
 		serviceRegion := servicesByName[name].Region()
-		serviceDir := filepath.Join(s.BaseDir(), serviceRegion)
+		serviceProfile := servicesByName[name].Profile()
+		serviceDir := filepath.Join(s.BaseDir(), serviceProfile, serviceRegion)
 		os.MkdirAll(serviceDir, 0700)
 
-		filename := fmt.Sprintf("%s%s", name, fileExt)
-		fullpath := filepath.Join(serviceDir, filename)
+		fullpath := filepath.Join(serviceDir, fmt.Sprintf("%s%s", name, fileExt))
 		f, err := os.OpenFile(fullpath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 		if err != nil {
 			allErrors = append(allErrors, fmt.Errorf("opening %s: %s", fullpath, err))
 			continue
 		}
+		closeFile := func() {
+			if err := f.Close(); err != nil {
+				allErrors = append(allErrors, fmt.Errorf("closing file %s: %s", fullpath, err))
+			}
+		}
 		if err := g.MarshalTo(f); err != nil {
 			allErrors = append(allErrors, fmt.Errorf("marshal to %s: %s", fullpath, err))
+			closeFile()
+			continue
+		}
+		relPath, err := filepath.Rel(s.BaseDir(), fullpath)
+		if err != nil {
+			allErrors = append(allErrors, err)
+			closeFile()
+			continue
 		}
 
-		filepaths = append(filepaths, filepath.Join(serviceRegion, filename))
-		if err := f.Close(); err != nil {
-			allErrors = append(allErrors, fmt.Errorf("closing file %s: %s", fullpath, err))
-		}
+		filepaths = append(filepaths, relPath)
+		closeFile()
 	}
 
 	if runtime.GOOS != "windows" { // https://github.com/wallix/awless/issues/119
@@ -178,57 +184,33 @@ func concatErrors(errs []error) error {
 	return errors.New(strings.Join(lines, "\n"))
 }
 
-func LoadLocalGraphForService(serviceName, region string) *graph.Graph {
+func LoadLocalGraphForService(serviceName, profile, region string) cloud.GraphAPI {
 	regionDir := region
-	if awsservices.IsGlobalService(serviceName) {
+	if serviceName == "access" || serviceName == "dns" || serviceName == "cdn" {
 		regionDir = "global"
 	}
-	path := filepath.Join(repo.BaseDir(), regionDir, fmt.Sprintf("%s%s", serviceName, fileExt))
-	g, err := graph.NewGraphFromFile(path)
+	path := filepath.Join(repo.BaseDir(), profile, regionDir, fmt.Sprintf("%s%s", serviceName, fileExt))
+	g, err := graph.NewGraphFromFiles(path)
 	if err != nil {
 		return graph.NewGraph()
 	}
 	return g
 }
 
-func LoadLocalGraphs(region string) (*graph.Graph, error) {
+func LoadLocalGraphs(profile, region string) (cloud.GraphAPI, error) {
 	var files []string
-	globalFiles, _ := filepath.Glob(filepath.Join(repo.BaseDir(), "global", fmt.Sprintf("*%s", fileExt)))
-	regionFiles, _ := filepath.Glob(filepath.Join(repo.BaseDir(), region, fmt.Sprintf("*%s", fileExt)))
+	globalFiles, _ := filepath.Glob(filepath.Join(repo.BaseDir(), profile, "global", fmt.Sprintf("*%s", fileExt)))
+	regionFiles, _ := filepath.Glob(filepath.Join(repo.BaseDir(), profile, region, fmt.Sprintf("*%s", fileExt)))
 
 	files = append(files, globalFiles...)
 	files = append(files, regionFiles...)
 
-	g := graph.NewGraph()
-
-	var readers []io.Reader
-	for _, f := range files {
-		reader, err := os.Open(f)
-		if err != nil {
-			return g, fmt.Errorf("loading '%s': %s", f, err)
-		}
-		readers = append(readers, reader)
-	}
-
-	err := g.UnmarshalFromReaders(readers...)
-	return g, err
+	return graph.NewGraphFromFiles(files...)
 }
 
-func LoadAllLocalGraphs() (*graph.Graph, error) {
-	path := filepath.Join(repo.BaseDir(), "*", fmt.Sprintf("*%s", fileExt))
+func LoadAllLocalGraphs(profile string) (cloud.GraphAPI, error) {
+	path := filepath.Join(repo.BaseDir(), profile, "*", fmt.Sprintf("*%s", fileExt))
 	files, _ := filepath.Glob(path)
 
-	g := graph.NewGraph()
-
-	var readers []io.Reader
-	for _, f := range files {
-		reader, err := os.Open(f)
-		if err != nil {
-			return g, fmt.Errorf("loading '%s': %s", f, err)
-		}
-		readers = append(readers, reader)
-	}
-
-	err := g.UnmarshalFromReaders(readers...)
-	return g, err
+	return graph.NewGraphFromFiles(files...)
 }

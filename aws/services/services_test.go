@@ -35,6 +35,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/aws/aws-sdk-go/service/ecs"
+	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/lambda"
@@ -44,6 +45,7 @@ import (
 	"github.com/wallix/awless/aws/fetch"
 	"github.com/wallix/awless/cloud"
 	p "github.com/wallix/awless/cloud/properties"
+	"github.com/wallix/awless/cloud/rdf"
 	"github.com/wallix/awless/fetch"
 	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/graph/resourcetest"
@@ -187,19 +189,19 @@ func TestBuildAccessRdfGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("policy", "group", "role", "user", cloud.MFADevice)
+	resources, err := g.Find(cloud.NewQuery("policy", "group", "role", "user", cloud.MFADevice))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.InlinePolicies].([]string); ok {
+		if p, ok := res.Properties()[p.InlinePolicies].([]string); ok {
 			sort.Strings(p)
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"managed_policy_1": resourcetest.Policy("managed_policy_1").Prop(p.Name, "nmanaged_policy_1").Prop(p.Type, "Customer Managed").Prop(p.Attached, true).Build(),
 		"managed_policy_2": resourcetest.Policy("managed_policy_2").Prop(p.Name, "nmanaged_policy_2").Prop(p.Type, "Customer Managed").Prop(p.Attached, false).Prop(p.Document, policyDoc).Build(),
 		"managed_policy_3": resourcetest.Policy("managed_policy_3").Prop(p.Name, "nmanaged_policy_3").Prop(p.Arn, "arn:aws:iam::aws:policy/managed_policy_3").Prop(p.Type, "AWS Managed").Prop(p.Attached, true).Build(),
@@ -357,12 +359,19 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 		{ZoneName: awssdk.String("us-west-1a"), State: awssdk.String("available"), RegionName: awssdk.String("us-west-1"), Messages: []*ec2.AvailabilityZoneMessage{{Message: awssdk.String("msg 1")}, {Message: awssdk.String("msg 2")}}},
 		{ZoneName: awssdk.String("us-west-1b")},
 	}
-	//ELB
+	//ELBV2
 	lbPages := []*elbv2.LoadBalancer{
 		{LoadBalancerArn: awssdk.String("lb_1"), LoadBalancerName: awssdk.String("my_loadbalancer"), VpcId: awssdk.String("vpc_1")},
 		{LoadBalancerArn: awssdk.String("lb_2"), VpcId: awssdk.String("vpc_2")},
 		{LoadBalancerArn: awssdk.String("lb_3"), VpcId: awssdk.String("vpc_1"), SecurityGroups: []*string{awssdk.String("securitygroup_1"), awssdk.String("securitygroup_2")}},
 	}
+	//ELB
+	classicLbPages := []*elb.LoadBalancerDescription{
+		{LoadBalancerName: awssdk.String("my_classic_loadbalancer_1"), VPCId: awssdk.String("vpc_1"), ListenerDescriptions: []*elb.ListenerDescription{{Listener: &elb.Listener{LoadBalancerPort: awssdk.Int64(443), Protocol: awssdk.String("HTTPS"), InstancePort: awssdk.Int64(8080), InstanceProtocol: awssdk.String("HTTP")}}}},
+		{LoadBalancerName: awssdk.String("my_classic_loadbalancer_2"), VPCId: awssdk.String("vpc_2")},
+		{LoadBalancerName: awssdk.String("my_classic_loadbalancer_3"), VPCId: awssdk.String("vpc_1"), SecurityGroups: []*string{awssdk.String("securitygroup_1"), awssdk.String("securitygroup_2")}},
+	}
+
 	targetGroups := []*elbv2.TargetGroup{
 		{TargetGroupArn: awssdk.String("tg_1"), VpcId: awssdk.String("vpc_1"), LoadBalancerArns: []*string{awssdk.String("lb_1"), awssdk.String("lb_3")}},
 		{TargetGroupArn: awssdk.String("tg_2"), VpcId: awssdk.String("vpc_2"), LoadBalancerArns: []*string{awssdk.String("lb_2")}},
@@ -549,6 +558,7 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 
 	mock := &mockEc2{vpcs: vpcs, securitygroups: securityGroups, subnets: subnets, instances: instances, keypairinfos: keypairs, internetgateways: igws, routetables: routeTables, images: images, availabilityzones: availabilityZones, natgateways: natgws, networkinterfaces: networkInterfaces}
 	mockLb := &mockElbv2{loadbalancers: lbPages, targetgroups: targetGroups, listeners: listeners, targethealthdescriptions: targetHealths}
+	mockClassicLb := &mockElb{loadbalancerdescriptions: classicLbPages}
 	mockEcr := &mockEcr{repositorys: repositories}
 	mockEcs := &mockEcs{clusterNames: clusterNames, clusters: clusters, taskdefinitionNames: defNames, taskdefinitions: tasksDef, tasksNames: tasksNames, tasks: tasks, containerinstancesNames: containerInstancesNames, containerinstances: containerInstances}
 	mockRds := &mockRds{}
@@ -558,34 +568,35 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 		EC2API:         mock,
 		ECRAPI:         mockEcr,
 		ECSAPI:         mockEcs,
+		ELBAPI:         mockClassicLb,
 		ELBV2API:       mockLb,
 		RDSAPI:         mockRds,
 		ACMAPI:         mockAcm,
 		AutoScalingAPI: mockAutoscaling,
 		region:         "eu-west-1",
-		fetcher:        fetch.NewFetcher(awsfetch.BuildInfraFetchFuncs(awsfetch.NewConfig(mock, mockEcr, mockEcs, mockLb, mockRds, mockAutoscaling, mockAcm))),
+		fetcher:        fetch.NewFetcher(awsfetch.BuildInfraFetchFuncs(awsfetch.NewConfig(mock, mockEcr, mockEcs, mockClassicLb, mockLb, mockRds, mockAutoscaling, mockAcm))),
 	}
 	g, err := InfraService.Fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources, err := g.GetAllResources("region", "instance", "vpc", "securitygroup", "subnet", "keypair", "internetgateway", cloud.NatGateway, "routetable", "loadbalancer", "targetgroup", "listener", "launchconfiguration", "scalinggroup", "image", "availabilityzone", "repository", cloud.ContainerCluster, cloud.ContainerTask, cloud.Container, cloud.ContainerInstance, cloud.NetworkInterface, cloud.Certificate)
+	resources, err := g.Find(cloud.NewQuery("region", "instance", "vpc", "securitygroup", "subnet", "keypair", "internetgateway", cloud.NatGateway, "routetable", "classicloadbalancer", "loadbalancer", "targetgroup", "listener", "launchconfiguration", "scalinggroup", "image", "availabilityzone", "repository", cloud.ContainerCluster, cloud.ContainerTask, cloud.Container, cloud.ContainerInstance, cloud.NetworkInterface, cloud.Certificate))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.SecurityGroups].([]string); ok {
+		if p, ok := res.Properties()[p.SecurityGroups].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Vpcs].([]string); ok {
+		if p, ok := res.Properties()[p.Vpcs].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Messages].([]string); ok {
+		if p, ok := res.Properties()[p.Messages].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.ContainersImages].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.ContainersImages].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName == p[j].KeyName {
 					return p[i].Value < p[j].Value
@@ -593,7 +604,7 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 				return p[i].KeyName < p[j].KeyName
 			})
 		}
-		if p, ok := res.Properties[p.Attributes].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.Attributes].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName == p[j].KeyName {
 					return p[i].Value < p[j].Value
@@ -601,7 +612,7 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 				return p[i].KeyName < p[j].KeyName
 			})
 		}
-		if p, ok := res.Properties[p.Associations].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.Associations].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName == p[j].KeyName {
 					return p[i].Value < p[j].Value
@@ -609,17 +620,17 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 				return p[i].KeyName < p[j].KeyName
 			})
 		}
-		if p, ok := res.Properties[p.InboundRules].([]*graph.FirewallRule); ok {
+		if p, ok := res.Properties()[p.InboundRules].([]*graph.FirewallRule); ok {
 			for _, r := range p {
 				sort.Strings(r.Sources)
 			}
 		}
-		if p, ok := res.Properties[p.IPv6Addresses].([]string); ok {
+		if p, ok := res.Properties()[p.IPv6Addresses].([]string); ok {
 			sort.Strings(p)
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"eu-west-1": resourcetest.Region("eu-west-1").Build(),
 		"inst_1":    resourcetest.Instance("inst_1").Prop(p.Subnet, "sub_1").Prop(p.Vpc, "vpc_1").Prop(p.Name, "instance1-name").Prop(p.Tags, []string{"Name=instance1-name"}).Build(),
 		"inst_2":    resourcetest.Instance("inst_2").Prop(p.Subnet, "sub_2").Prop(p.Vpc, "vpc_1").Prop(p.SecurityGroups, []string{"securitygroup_1"}).Build(),
@@ -635,20 +646,23 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 		"securitygroup_1": resourcetest.SecurityGroup("securitygroup_1").Prop(p.Name, "my_securitygroup").Prop(p.Vpc, "vpc_1").
 			Prop(p.InboundRules, []*graph.FirewallRule{{PortRange: graph.PortRange{FromPort: 22, ToPort: 80, Any: false}, Protocol: "tcp", Sources: []string{"group_1", "group_2"}}}).
 			Prop(p.OutboundRules, []*graph.FirewallRule{{PortRange: graph.PortRange{FromPort: 0, ToPort: 65535, Any: false}, Protocol: "tcp", IPRanges: []*net.IPNet{{IP: net.IP{0xa, 0x14, 0x0, 0x0}, Mask: net.CIDRMask(16, 32)}}}}).Build(),
-		"securitygroup_2":  resourcetest.SecurityGroup("securitygroup_2").Prop(p.Vpc, "vpc_1").Build(),
-		"sub_1":            resourcetest.Subnet("sub_1").Prop(p.Vpc, "vpc_1").Build(),
-		"sub_2":            resourcetest.Subnet("sub_2").Prop(p.Vpc, "vpc_1").Build(),
-		"sub_3":            resourcetest.Subnet("sub_3").Prop(p.Vpc, "vpc_2").Build(),
-		"sub_4":            resourcetest.Subnet("sub_4").Build(),
-		"us-west-1a":       resourcetest.AvailabilityZone("us-west-1a").Prop(p.Name, "us-west-1a").Prop(p.State, "available").Prop(p.Region, "us-west-1").Prop(p.Messages, []string{"msg 1", "msg 2"}).Build(),
-		"us-west-1b":       resourcetest.AvailabilityZone("us-west-1b").Prop(p.Name, "us-west-1b").Build(),
-		"my_key":           resourcetest.KeyPair("my_key").Build(),
-		"igw_1":            resourcetest.InternetGw("igw_1").Prop(p.Vpcs, []string{"vpc_2"}).Build(),
-		"natgw_1":          resourcetest.NatGw("natgw_1").Prop(p.Vpc, "vpc_1").Prop(p.Subnet, "sub_1").Build(),
-		"rt_1":             resourcetest.RouteTable("rt_1").Prop(p.Vpc, "vpc_1").Prop(p.Main, true).Prop(p.Associations, []*graph.KeyValue{{KeyName: "assoc_1", Value: "sub_1"}, {KeyName: "assoc_2", Value: "sub_2"}}).Build(),
-		"lb_1":             resourcetest.LoadBalancer("lb_1").Prop(p.Arn, "lb_1").Prop(p.Name, "my_loadbalancer").Prop(p.Vpc, "vpc_1").Build(),
-		"lb_2":             resourcetest.LoadBalancer("lb_2").Prop(p.Arn, "lb_2").Prop(p.Vpc, "vpc_2").Build(),
-		"lb_3":             resourcetest.LoadBalancer("lb_3").Prop(p.Arn, "lb_3").Prop(p.Vpc, "vpc_1").Build(),
+		"securitygroup_2": resourcetest.SecurityGroup("securitygroup_2").Prop(p.Vpc, "vpc_1").Build(),
+		"sub_1":           resourcetest.Subnet("sub_1").Prop(p.Vpc, "vpc_1").Build(),
+		"sub_2":           resourcetest.Subnet("sub_2").Prop(p.Vpc, "vpc_1").Build(),
+		"sub_3":           resourcetest.Subnet("sub_3").Prop(p.Vpc, "vpc_2").Build(),
+		"sub_4":           resourcetest.Subnet("sub_4").Build(),
+		"us-west-1a":      resourcetest.AvailabilityZone("us-west-1a").Prop(p.Name, "us-west-1a").Prop(p.State, "available").Prop(p.Region, "us-west-1").Prop(p.Messages, []string{"msg 1", "msg 2"}).Build(),
+		"us-west-1b":      resourcetest.AvailabilityZone("us-west-1b").Prop(p.Name, "us-west-1b").Build(),
+		"my_key":          resourcetest.KeyPair("my_key").Build(),
+		"igw_1":           resourcetest.InternetGw("igw_1").Prop(p.Vpcs, []string{"vpc_2"}).Build(),
+		"natgw_1":         resourcetest.NatGw("natgw_1").Prop(p.Vpc, "vpc_1").Prop(p.Subnet, "sub_1").Build(),
+		"rt_1":            resourcetest.RouteTable("rt_1").Prop(p.Vpc, "vpc_1").Prop(p.Default, true).Prop(p.Associations, []*graph.KeyValue{{KeyName: "assoc_1", Value: "sub_1"}, {KeyName: "assoc_2", Value: "sub_2"}}).Build(),
+		"lb_1":            resourcetest.LoadBalancer("lb_1").Prop(p.Arn, "lb_1").Prop(p.Name, "my_loadbalancer").Prop(p.Vpc, "vpc_1").Build(),
+		"lb_2":            resourcetest.LoadBalancer("lb_2").Prop(p.Arn, "lb_2").Prop(p.Vpc, "vpc_2").Build(),
+		"lb_3":            resourcetest.LoadBalancer("lb_3").Prop(p.Arn, "lb_3").Prop(p.Vpc, "vpc_1").Build(),
+		"my_classic_loadbalancer_1": resourcetest.ClassicLoadBalancer("my_classic_loadbalancer_1").Prop(p.Name, "my_classic_loadbalancer_1").Prop(p.Vpc, "vpc_1").Prop(p.Ports, []string{"HTTPS:443:HTTP:8080"}).Build(),
+		"my_classic_loadbalancer_2": resourcetest.ClassicLoadBalancer("my_classic_loadbalancer_2").Prop(p.Name, "my_classic_loadbalancer_2").Prop(p.Vpc, "vpc_2").Build(),
+		"my_classic_loadbalancer_3": resourcetest.ClassicLoadBalancer("my_classic_loadbalancer_3").Prop(p.Name, "my_classic_loadbalancer_3").Prop(p.Vpc, "vpc_1").Build(),
 		"tg_1":             resourcetest.TargetGroup("tg_1").Prop(p.Arn, "tg_1").Prop(p.Vpc, "vpc_1").Build(),
 		"tg_2":             resourcetest.TargetGroup("tg_2").Prop(p.Arn, "tg_2").Prop(p.Vpc, "vpc_2").Build(),
 		"list_1":           resourcetest.Listener("list_1").Prop(p.Arn, "list_1").Prop(p.LoadBalancer, "lb_1").Build(),
@@ -698,8 +712,8 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 		"sub_1":     {"eni-1", "inst_1"},
 		"sub_2":     {"inst_2"},
 		"sub_3":     {"eni-2", "inst_3", "inst_4", "inst_6"},
-		"vpc_1":     {"lb_1", "lb_3", "natgw_1", "rt_1", "securitygroup_1", "securitygroup_2", "sub_1", "sub_2", "tg_1"},
-		"vpc_2":     {"lb_2", "sub_3", "tg_2"},
+		"vpc_1":     {"lb_1", "lb_3", "my_classic_loadbalancer_1", "my_classic_loadbalancer_3", "natgw_1", "rt_1", "securitygroup_1", "securitygroup_2", "sub_1", "sub_2", "tg_1"},
+		"vpc_2":     {"lb_2", "my_classic_loadbalancer_2", "sub_3", "tg_2"},
 		"clust_1":   {"cont_inst_1", "cont_inst_2", "container_1", "container_2", "container_3"},
 		"clust_2":   {"cont_inst_3", "container_4", "container_5"},
 	}
@@ -712,8 +726,8 @@ func TestBuildInfraRdfGraph(t *testing.T) {
 		"my_key":          {"inst_4", "inst_6", "launchconfig_arn"},
 		"natgw_1":         {"sub_1"},
 		"rt_1":            {"sub_1", "sub_2"},
-		"securitygroup_1": {"eni-1", "inst_2", "inst_4", "inst_6", "lb_3"},
-		"securitygroup_2": {"eni-1", "inst_4", "lb_3"},
+		"securitygroup_1": {"eni-1", "inst_2", "inst_4", "inst_6", "lb_3", "my_classic_loadbalancer_3"},
+		"securitygroup_2": {"eni-1", "inst_4", "lb_3", "my_classic_loadbalancer_3"},
 		"tg_1":            {"inst_1"},
 		"tg_2":            {"inst_2", "inst_3"},
 		"asg_arn_1":       {"inst_1", "inst_3", "sub_1", "sub_2"},
@@ -789,12 +803,12 @@ func TestBuildStorageRdfGraph(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resources, err := g.GetAllResources("region", "bucket")
+	resources, err := g.Find(cloud.NewQuery("region", "bucket"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"eu-west-1":   resourcetest.Region("eu-west-1").Build(),
 		"bucket_eu_1": resourcetest.Bucket("bucket_eu_1").Prop(p.Grants, []*graph.Grant{{Grantee: graph.Grantee{GranteeID: "usr_2"}, Permission: "Write"}}).Build(),
 		"bucket_eu_2": resourcetest.Bucket("bucket_eu_2").Prop(p.Grants, []*graph.Grant{{Grantee: graph.Grantee{GranteeID: "usr_1"}, Permission: "Write"}}).Build(),
@@ -838,26 +852,26 @@ func TestBuildDnsRdfGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("zone", "record")
+	resources, err := g.Find(cloud.NewQuery("zone", "record"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.Records].([]string); ok {
+		if p, ok := res.Properties()[p.Records].([]string); ok {
 			sort.Strings(p)
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"/hostedzone/12345": resourcetest.Zone("/hostedzone/12345").Prop(p.Name, "my.first.domain").Build(),
 		"/hostedzone/23456": resourcetest.Zone("/hostedzone/23456").Prop(p.Name, "my.second.domain").Build(),
 		"/hostedzone/34567": resourcetest.Zone("/hostedzone/34567").Prop(p.Name, "my.third.domain").Build(),
-		"awls-91fa0a45":     resourcetest.Record("awls-91fa0a45").Prop(p.Name, "subdomain1.my.first.domain").Prop(p.Type, "A").Prop(p.TTL, 10).Prop(p.Records, []string{"1.2.3.4", "2.3.4.5"}).Build(),
-		"awls-920c0a46":     resourcetest.Record("awls-920c0a46").Prop(p.Name, "subdomain2.my.first.domain").Prop(p.Type, "A").Prop(p.TTL, 10).Prop(p.Records, []string{"3.4.5.6"}).Build(),
-		"awls-be1e0b6a":     resourcetest.Record("awls-be1e0b6a").Prop(p.Name, "subdomain3.my.first.domain").Prop(p.Type, "CNAME").Prop(p.TTL, 60).Prop(p.Records, []string{"4.5.6.7"}).Build(),
-		"awls-9c420a99":     resourcetest.Record("awls-9c420a99").Prop(p.Name, "subdomain1.my.second.domain").Prop(p.Type, "A").Prop(p.TTL, 30).Prop(p.Records, []string{"5.6.7.8"}).Build(),
-		"awls-c9b80bbe":     resourcetest.Record("awls-c9b80bbe").Prop(p.Name, "subdomain3.my.second.domain").Prop(p.Type, "CNAME").Prop(p.TTL, 10).Prop(p.Records, []string{"6.7.8.9"}).Build(),
+		"awls-91fa0a45":     resourcetest.Record("awls-91fa0a45").Prop(p.Name, "subdomain1.my.first.domain").Prop(p.Zone, "my.first.domain").Prop(p.Type, "A").Prop(p.TTL, 10).Prop(p.Records, []string{"1.2.3.4", "2.3.4.5"}).Build(),
+		"awls-920c0a46":     resourcetest.Record("awls-920c0a46").Prop(p.Name, "subdomain2.my.first.domain").Prop(p.Zone, "my.first.domain").Prop(p.Type, "A").Prop(p.TTL, 10).Prop(p.Records, []string{"3.4.5.6"}).Build(),
+		"awls-be1e0b6a":     resourcetest.Record("awls-be1e0b6a").Prop(p.Name, "subdomain3.my.first.domain").Prop(p.Zone, "my.first.domain").Prop(p.Type, "CNAME").Prop(p.TTL, 60).Prop(p.Records, []string{"4.5.6.7"}).Build(),
+		"awls-9c420a99":     resourcetest.Record("awls-9c420a99").Prop(p.Name, "subdomain1.my.second.domain").Prop(p.Zone, "my.second.domain").Prop(p.Type, "A").Prop(p.TTL, 30).Prop(p.Records, []string{"5.6.7.8"}).Build(),
+		"awls-c9b80bbe":     resourcetest.Record("awls-c9b80bbe").Prop(p.Name, "subdomain3.my.second.domain").Prop(p.Zone, "my.second.domain").Prop(p.Type, "CNAME").Prop(p.TTL, 10).Prop(p.Records, []string{"6.7.8.9"}).Build(),
 	}
 	expectedChildren := map[string][]string{
 		"/hostedzone/12345": {"awls-91fa0a45", "awls-920c0a46", "awls-be1e0b6a"},
@@ -907,12 +921,12 @@ func TestBuildNotificationGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("subscription", "topic")
+	resources, err := g.Find(cloud.NewQuery("subscription", "topic"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"endpoint_1":  resourcetest.Subscription("endpoint_1").Prop(p.Endpoint, "endpoint_1").Build(),
 		"endpoint_2":  resourcetest.Subscription("endpoint_2").Prop(p.Endpoint, "endpoint_2").Prop(p.Owner, "subscr_owner").Prop(p.Protocol, "subscr_prot").Prop(p.Arn, "subscr_arn").Prop(p.Topic, "topic_arn_2").Build(),
 		"endpoint_3":  resourcetest.Subscription("endpoint_3").Prop(p.Endpoint, "endpoint_3").Prop(p.Topic, "topic_arn_2").Build(),
@@ -928,12 +942,12 @@ func TestBuildNotificationGraph(t *testing.T) {
 
 	compareResources(t, g, resources, expected, expectedChildren, expectedAppliedOn)
 
-	resources, err = g.GetAllResources("queue")
+	resources, err = g.Find(cloud.NewQuery("queue"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected = map[string]*graph.Resource{
+	expected = map[string]cloud.Resource{
 		"queue_1": resourcetest.Queue("queue_1").Build(),
 		"queue_2": resourcetest.Queue("queue_2").Prop(p.ApproximateMessageCount, 4).Prop(p.Created, time.Unix(1494419259, 0).UTC()).Prop(p.Modified, time.Unix(1494332859, 0).UTC()).Prop(p.Arn, "queue_2_arn").Prop(p.Delay, 15).Build(),
 		"queue_3": resourcetest.Queue("queue_3").Prop(p.ApproximateMessageCount, 12).Build(),
@@ -977,12 +991,12 @@ func TestBuildLambdaGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("function")
+	resources, err := g.Find(cloud.NewQuery("function"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"func_1_arn": resourcetest.Function("func_1_arn").Prop(p.Arn, "func_1_arn").Build(),
 		"func_2_arn": resourcetest.Function("func_2_arn").Prop(p.Arn, "func_2_arn").Prop(p.Name, "func_2_name").Prop(p.Hash, "abcdef123456789").Prop(p.Size, 1234).
 			Prop(p.Description, "my function desc").Prop(p.Handler, "handl").Prop(p.Modified, time.Unix(1136214245, 0).UTC()).Prop(p.Memory, 1234).Prop(p.Role, "role").
@@ -1037,22 +1051,22 @@ func TestBuildMonitoringGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("metric", "alarm")
+	resources, err := g.Find(cloud.NewQuery("metric", "alarm"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.OKActions].([]string); ok {
+		if p, ok := res.Properties()[p.OKActions].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.AlarmActions].([]string); ok {
+		if p, ok := res.Properties()[p.AlarmActions].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.InsufficientDataActions].([]string); ok {
+		if p, ok := res.Properties()[p.InsufficientDataActions].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Dimensions].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.Dimensions].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName != p[j].KeyName {
 					return p[i].KeyName < p[j].KeyName
@@ -1062,7 +1076,7 @@ func TestBuildMonitoringGraph(t *testing.T) {
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"awls-4ba90752": resourcetest.Metric("awls-4ba90752").Prop(p.Name, "metric_1").Prop(p.Namespace, "namespace_1").Build(),
 		"awls-4baa0753": resourcetest.Metric("awls-4baa0753").Prop(p.Name, "metric_2").Prop(p.Namespace, "namespace_1").Prop(p.Dimensions, []*graph.KeyValue{{KeyName: "first", Value: "dimension"}, {KeyName: "second", Value: "dimension"}}).Build(),
 		"awls-4bb20753": resourcetest.Metric("awls-4bb20753").Prop(p.Name, "metric_1").Prop(p.Namespace, "namespace_2").Build(),
@@ -1146,24 +1160,24 @@ func TestBuildCdnGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("distribution")
+	resources, err := g.Find(cloud.NewQuery("distribution"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.Aliases].([]string); ok {
+		if p, ok := res.Properties()[p.Aliases].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Origins].([]*graph.DistributionOrigin); ok {
+		if p, ok := res.Properties()[p.Origins].([]*graph.DistributionOrigin); ok {
 			sort.Slice(p, func(i, j int) bool {
 				return p[i].ID <= p[j].ID
 			})
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"ds_1": resourcetest.Distribution("ds_1").
 			Prop(p.Arn, "ds_1_arn").
 			Prop(p.Aliases, []string{"cname1.domain.name", "cname2.domain.name"}).
@@ -1235,19 +1249,19 @@ func TestBuildCloudFormationGraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err := g.GetAllResources("stack")
+	resources, err := g.Find(cloud.NewQuery("stack"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Sort slice properties in resources
 	for _, res := range resources {
-		if p, ok := res.Properties[p.Capabilities].([]string); ok {
+		if p, ok := res.Properties()[p.Capabilities].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Notifications].([]string); ok {
+		if p, ok := res.Properties()[p.Notifications].([]string); ok {
 			sort.Strings(p)
 		}
-		if p, ok := res.Properties[p.Parameters].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.Parameters].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName != p[j].KeyName {
 					return p[i].KeyName < p[j].KeyName
@@ -1255,7 +1269,7 @@ func TestBuildCloudFormationGraph(t *testing.T) {
 				return p[i].Value <= p[j].Value
 			})
 		}
-		if p, ok := res.Properties[p.Outputs].([]*graph.KeyValue); ok {
+		if p, ok := res.Properties()[p.Outputs].([]*graph.KeyValue); ok {
 			sort.Slice(p, func(i, j int) bool {
 				if p[i].KeyName != p[j].KeyName {
 					return p[i].KeyName < p[j].KeyName
@@ -1265,7 +1279,7 @@ func TestBuildCloudFormationGraph(t *testing.T) {
 		}
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"id_1": resourcetest.Stack("id_1").
 			Prop(p.Name, "name_1").
 			Prop(p.Capabilities, []string{"cap_1", "cap_2", "cap_3"}).
@@ -1309,11 +1323,11 @@ func TestBuildEmptyRdfGraphWhenNoData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := map[string]*graph.Resource{
+	expected := map[string]cloud.Resource{
 		"eu-west-1": resourcetest.Region("eu-west-1").Build(),
 	}
 	expectedChildren, expectedAppliedOn := map[string][]string{}, map[string][]string{}
-	resources, err := g.GetAllResources("region")
+	resources, err := g.Find(cloud.NewQuery("region"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1322,6 +1336,7 @@ func TestBuildEmptyRdfGraphWhenNoData(t *testing.T) {
 
 	infra := Infra{
 		EC2API:         &mockEc2{},
+		ELBAPI:         &mockElb{},
 		ELBV2API:       &mockElbv2{},
 		RDSAPI:         &mockRds{},
 		AutoScalingAPI: &mockAutoscaling{},
@@ -1330,7 +1345,7 @@ func TestBuildEmptyRdfGraphWhenNoData(t *testing.T) {
 		ACMAPI:         &mockAcm{},
 		region:         "eu-west-1",
 		fetcher: fetch.NewFetcher(awsfetch.BuildInfraFetchFuncs(awsfetch.NewConfig(
-			&mockEc2{}, &mockElbv2{}, &mockRds{}, &mockEcr{}, &mockEcs{}, &mockAutoscaling{}, &mockAcm{},
+			&mockEc2{}, &mockElb{}, &mockElbv2{}, &mockRds{}, &mockEcr{}, &mockEcs{}, &mockAutoscaling{}, &mockAcm{},
 		))),
 	}
 
@@ -1339,7 +1354,7 @@ func TestBuildEmptyRdfGraphWhenNoData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	resources, err = g.GetAllResources("region")
+	resources, err = g.Find(cloud.NewQuery("region"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1347,37 +1362,35 @@ func TestBuildEmptyRdfGraphWhenNoData(t *testing.T) {
 	compareResources(t, g, resources, expected, expectedChildren, expectedAppliedOn)
 }
 
-func mustGetChildrenId(g *graph.Graph, res *graph.Resource) []string {
+func mustGetChildrenId(g cloud.GraphAPI, res cloud.Resource) []string {
 	var collect []string
-
-	err := g.Accept(&graph.ChildrenVisitor{From: res, IncludeFrom: false, Each: func(res *graph.Resource, depth int) error {
-		if depth == 1 {
-			collect = append(collect, res.Id())
-		}
-		return nil
-	}})
+	children, err := g.ResourceRelations(res, rdf.ChildrenOfRel, false)
 	if err != nil {
 		panic(err)
+	}
+	for _, child := range children {
+		collect = append(collect, child.Id())
 	}
 	return collect
 }
 
-func mustGetAppliedOnId(g *graph.Graph, res *graph.Resource) []string {
-	resources, err := g.ListResourcesAppliedOn(res)
+func mustGetAppliedOnId(g cloud.GraphAPI, res cloud.Resource) []string {
+	var collect []string
+	children, err := g.ResourceRelations(res, rdf.ApplyOn, false)
 	if err != nil {
 		panic(err)
 	}
-	var ids []string
-	for _, r := range resources {
-		ids = append(ids, r.Id())
+	for _, child := range children {
+		collect = append(collect, child.Id())
 	}
-	return ids
+	return collect
 }
 
-func compareResources(t *testing.T, g *graph.Graph, resources []*graph.Resource, expected map[string]*graph.Resource, expectedChildren, expectedAppliedOn map[string][]string) {
+func compareResources(t *testing.T, g cloud.GraphAPI, resources []cloud.Resource, expected map[string]cloud.Resource, expectedChildren, expectedAppliedOn map[string][]string) {
+	t.Helper()
 	if got, want := len(resources), len(expected); got != want {
 		t.Errorf("got %d, want %d", got, want)
-		t.Fatalf("got %#v\nwant %#v\n", resources, expected)
+		//t.Fatalf("got %#v\nwant %#v\n", resources, expected)
 	}
 	for _, got := range resources {
 		want := expected[got.Id()]

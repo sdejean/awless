@@ -4,105 +4,51 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
-	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/env"
 	"github.com/wallix/awless/template/internal/ast"
+	"github.com/wallix/awless/template/params"
 )
-
-type LookupFunc func(...string) interface{}
-
-type Env struct {
-	Lookuper LookupFunc
-	IsDryRun bool
-
-	ResolvedVariables map[string]interface{}
-
-	Fillers          map[string]interface{}
-	AliasFunc        func(entity, key, alias string) string
-	MissingHolesFunc func(string, []string) interface{}
-	Log              *logger.Logger
-
-	processedFillers map[string]interface{}
-}
-
-func NewEnv() *Env {
-	return &Env{
-		AliasFunc:         nil,
-		MissingHolesFunc:  nil,
-		Lookuper:          func(...string) interface{} { return nil },
-		Log:               logger.DiscardLogger,
-		ResolvedVariables: make(map[string]interface{}),
-		processedFillers:  make(map[string]interface{}),
-	}
-}
-
-func (e *Env) AddFillers(fills ...map[string]interface{}) {
-	if e.Fillers == nil {
-		e.Fillers = make(map[string]interface{})
-	}
-
-	for _, f := range fills {
-		for k, v := range f {
-			e.Fillers[k] = v
-		}
-	}
-}
-
-func (e *Env) addToProcessedFillers(fills ...map[string]interface{}) {
-	if e.processedFillers == nil {
-		e.processedFillers = make(map[string]interface{})
-	}
-
-	for _, f := range fills {
-		for k, v := range f {
-			e.processedFillers[k] = v
-		}
-	}
-}
-
-func (e *Env) GetProcessedFillers() (copy map[string]interface{}) {
-	copy = make(map[string]interface{}, 0)
-	for k, v := range e.processedFillers {
-		copy[k] = v
-	}
-	return
-}
 
 type Mode []compileFunc
 
 var (
 	TestCompileMode = []compileFunc{
-		verifyCommandsDefinedPass,
+		injectCommandsInNodesPass,
 		failOnDeclarationWithNoResultPass,
-		validateCommandsParamsPass,
-		normalizeMissingRequiredParamsAsHolePass,
+		processAndValidateParamsPass,
 		checkInvalidReferenceDeclarationsPass,
 		resolveHolesPass,
 		resolveMissingHolesPass,
+		removeOptionalHolesPass,
 		resolveAliasPass,
 		inlineVariableValuePass,
+		resolveParamsAndExtractRefsPass,
+	}
+
+	PreRevertCompileMode = []compileFunc{
+		resolveParamsAndExtractRefsPass,
 	}
 
 	NewRunnerCompileMode = []compileFunc{
-		verifyCommandsDefinedPass,
+		injectCommandsInNodesPass,
 		failOnDeclarationWithNoResultPass,
-		validateCommandsParamsPass,
-		normalizeMissingRequiredParamsAsHolePass,
+		processAndValidateParamsPass,
 		checkInvalidReferenceDeclarationsPass,
 		resolveHolesPass,
 		resolveMissingHolesPass,
+		removeOptionalHolesPass,
 		resolveAliasPass,
 		inlineVariableValuePass,
 		failOnUnresolvedHolesPass,
 		failOnUnresolvedAliasPass,
+		resolveParamsAndExtractRefsPass,
 		convertParamsPass,
 		validateCommandsPass,
-		injectCommandsPass,
 	}
 )
 
-func Compile(tpl *Template, env *Env, mode ...Mode) (*Template, *Env, error) {
+func Compile(tpl *Template, cenv env.Compiling, mode ...Mode) (*Template, env.Compiling, error) {
 	var pass *multiPass
 
 	if len(mode) > 0 {
@@ -111,10 +57,10 @@ func Compile(tpl *Template, env *Env, mode ...Mode) (*Template, *Env, error) {
 		pass = newMultiPass(NewRunnerCompileMode...)
 	}
 
-	return pass.compile(tpl, env)
+	return pass.compile(tpl, cenv)
 }
 
-type compileFunc func(*Template, *Env) (*Template, *Env, error)
+type compileFunc func(*Template, env.Compiling) (*Template, env.Compiling, error)
 
 // Leeloo Dallas
 type multiPass struct {
@@ -125,8 +71,8 @@ func newMultiPass(passes ...compileFunc) *multiPass {
 	return &multiPass{passes: passes}
 }
 
-func (p *multiPass) compile(tpl *Template, env *Env) (newTpl *Template, newEnv *Env, err error) {
-	newTpl, newEnv = tpl, env
+func (p *multiPass) compile(tpl *Template, cenv env.Compiling) (newTpl *Template, newEnv env.Compiling, err error) {
+	newTpl, newEnv = tpl, cenv
 	for _, pass := range p.passes {
 		newTpl, newEnv, err = pass(newTpl, newEnv)
 		if err != nil {
@@ -137,36 +83,35 @@ func (p *multiPass) compile(tpl *Template, env *Env) (newTpl *Template, newEnv *
 	return
 }
 
-func verifyCommandsDefinedPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	if env.Lookuper == nil {
-		return tpl, env, fmt.Errorf("command lookuper is undefined")
+func injectCommandsInNodesPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	if cenv.LookupCommandFunc() == nil {
+		return tpl, cenv, fmt.Errorf("command lookuper is undefined")
 	}
 
 	for _, node := range tpl.CommandNodesIterator() {
 		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return tpl, env, fmt.Errorf("cannot find command for '%s'", key)
+		cmd, ok := cenv.LookupCommandFunc()(key).(ast.Command)
+		if !ok {
+			return tpl, cenv, fmt.Errorf("%s: casting: %v is not a command", key, cmd)
 		}
+		if cmd == nil {
+			return tpl, cenv, fmt.Errorf("command for '%s' is nil", key)
+		}
+		node.Command = cmd
 	}
-	return tpl, env, nil
+	return tpl, cenv, nil
 }
 
-func failOnDeclarationWithNoResultPass(tpl *Template, env *Env) (*Template, *Env, error) {
+func failOnDeclarationWithNoResultPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
 	failOnDeclarationWithNoResult := func(node *ast.DeclarationNode) error {
 		cmdNode, ok := node.Expr.(*ast.CommandNode)
 		if !ok {
 			return nil
 		}
-		key := fmt.Sprintf("%s%s", cmdNode.Action, cmdNode.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return fmt.Errorf("validate: cannot find command for '%s'", key)
-		}
 		type ER interface {
 			ExtractResult(interface{}) string
 		}
-		if _, ok := cmd.(ER); !ok {
+		if _, ok := cmdNode.Command.(ER); !ok {
 			return cmdErr(cmdNode, "command does not return a result, cannot assign to a variable")
 		}
 		return nil
@@ -174,324 +119,258 @@ func failOnDeclarationWithNoResultPass(tpl *Template, env *Env) (*Template, *Env
 
 	for _, dcl := range tpl.declarationNodesIterator() {
 		if err := failOnDeclarationWithNoResult(dcl); err != nil {
-			return tpl, env, err
+			return tpl, cenv, err
 		}
 	}
-	return tpl, env, nil
+	return tpl, cenv, nil
 }
 
-func validateCommandsParamsPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	verifyValidParamsOnly := func(node *ast.CommandNode) error {
-		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return fmt.Errorf("validate: cannot find command for '%s'", key)
+func processAndValidateParamsPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	normalizeMissingRequiredParamsAsHoleAndValidate := func(node *ast.CommandNode) error {
+		rule := node.ParamsSpec().Rule()
+
+		missingRequired := rule.Missing(node.Keys())
+		for _, e := range missingRequired {
+			normalized := fmt.Sprintf("%s.%s", node.Entity, e)
+			node.ParamNodes[e] = ast.NewHoleNode(normalized)
 		}
-		type VP interface {
-			ValidateParams([]string) ([]string, error)
+		if err := params.Run(rule, node.Keys()); err != nil {
+			return cmdErr(node, err)
 		}
-		if v, ok := cmd.(VP); ok {
-			if _, err := v.ValidateParams(node.Keys()); err != nil {
-				return cmdErr(node, err)
-			}
-		} else {
-			return cmdErr(node, "command does not implement param validation")
+
+		_, optionals, suggested := params.List(rule)
+
+		switch cenv.ParamsMode() {
+		case env.REQUIRED_PARAMS_ONLY:
+			return nil
+		case env.REQUIRED_AND_SUGGESTED_PARAMS:
+			suggested = excludeFromSlice(suggested, node.Keys())
+		case env.ALL_PARAMS:
+			suggested = excludeFromSlice(optionals, node.Keys())
+		}
+
+		for _, e := range suggested {
+			key := fmt.Sprintf("%s.%s", node.Entity, e)
+			node.ParamNodes[e] = ast.NewOptionalHoleNode(key)
 		}
 		return nil
 	}
 
-	err := tpl.visitCommandNodesE(verifyValidParamsOnly)
-	return tpl, env, err
+	err := tpl.visitCommandNodesE(normalizeMissingRequiredParamsAsHoleAndValidate)
+	return tpl, cenv, err
 }
 
-func normalizeMissingRequiredParamsAsHolePass(tpl *Template, env *Env) (*Template, *Env, error) {
-	normalize := func(node *ast.CommandNode) error {
-		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return fmt.Errorf("normalize: cannot find command for '%s'", key)
-		}
-		type VP interface {
-			ValidateParams([]string) ([]string, error)
-		}
-		if v, ok := cmd.(VP); ok {
-			missing, err := v.ValidateParams(node.Keys())
-			if err != nil {
-				return cmdErr(node, err)
-			}
-			for _, e := range missing {
-				normalized := fmt.Sprintf("%s.%s", node.Entity, e)
-				node.Params[e] = ast.NewHoleValue(normalized)
-			}
-		} else {
-			return cmdErr(node, "command does not implement param normalization")
-		}
-		return nil
-	}
-
-	err := tpl.visitCommandNodesE(normalize)
-	return tpl, env, err
-}
-
-func convertParamsPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	convert := func(node *ast.CommandNode) error {
-		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return fmt.Errorf("convert: cannot find command for '%s'", key)
-		}
-
-		type C interface {
-			ConvertParams() ([]string, func(values map[string]interface{}) (map[string]interface{}, error))
-		}
-		if v, ok := cmd.(C); ok {
-			keys, convFunc := v.ConvertParams()
-			values := make(map[string]interface{})
-			params := node.ToDriverParams()
-			for _, k := range keys {
-				if vv, ok := params[k]; ok {
-					values[k] = vv
+func resolveParamsAndExtractRefsPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	for _, node := range tpl.CommandNodesIterator() {
+		for k, param := range node.ParamNodes {
+			switch paramNode := param.(type) {
+			case ast.InterfaceNode:
+				node.ParamNodes[k] = paramNode.Value()
+			case ast.RefNode:
+				node.Refs[k] = paramNode
+				delete(node.ParamNodes, k)
+			case ast.ListNode:
+				var hasRef bool
+				var arr []interface{}
+				for _, elem := range paramNode.Elems() {
+					switch e := elem.(type) {
+					case ast.InterfaceNode:
+						arr = append(arr, e.Value())
+					case ast.RefNode:
+						hasRef = true
+						arr = append(arr, e)
+					case ast.ConcatenationNode:
+						arr = append(arr, e.Concat())
+					case ast.HoleNode, ast.AliasNode, ast.ListNode:
+						return tpl, cenv, fmt.Errorf("%s: unresolved value in list of type %T", k, e)
+					default:
+						arr = append(arr, e)
+					}
 				}
+				if hasRef {
+					node.Refs[k] = ast.NewListNode(arr)
+					delete(node.ParamNodes, k)
+				} else {
+					node.ParamNodes[k] = arr
+				}
+			case ast.ConcatenationNode:
+				node.ParamNodes[k] = paramNode.Concat()
+			case ast.HoleNode, ast.AliasNode:
+				return tpl, cenv, fmt.Errorf("%s: unresolved value of type %T", k, paramNode)
 			}
-			converted, err := convFunc(values)
+		}
+	}
+	return tpl, cenv, nil
+}
+
+func convertParamsPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	convert := func(node *ast.CommandNode) error {
+		for _, reducer := range node.ParamsSpec().Reducers() {
+			params := make(map[string]interface{})
+			for k, v := range node.ParamNodes {
+				params[k] = v
+			}
+			for k, v := range node.Refs {
+				params[k] = v
+			}
+
+			out, err := reducer.Reduce(params)
 			if err != nil {
 				return cmdErr(node, err)
 			}
-			for _, k := range keys {
-				delete(node.Params, k)
+			for _, k := range reducer.Keys() {
+				delete(node.ParamNodes, k)
+				delete(node.Refs, k)
 			}
-			for k, v := range converted {
-				node.Params[k] = ast.NewInterfaceValue(v)
+			for k, v := range out {
+				switch v.(type) {
+				case ast.ListNode, ast.RefNode, ast.ConcatenationNode:
+					node.Refs[k] = v
+				default:
+					node.ParamNodes[k] = v
+				}
 			}
 		}
 		return nil
 	}
 	err := tpl.visitCommandNodesE(convert)
-	return tpl, env, err
+	return tpl, cenv, err
 }
 
-func validateCommandsPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	var errs []error
-
+func validateCommandsPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
 	collectValidationErrs := func(node *ast.CommandNode) error {
-		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		cmd := env.Lookuper(key)
-		if cmd == nil {
-			return fmt.Errorf("validate: cannot find command for '%s'", key)
-		}
-		type V interface {
-			ValidateCommand(map[string]interface{}, []string) []error
-		}
-		if v, ok := cmd.(V); ok {
-			var refsKey []string
-			for k, p := range node.Params {
-				if ref, isRef := p.(ast.WithRefs); isRef && len(ref.GetRefs()) > 0 {
-					refsKey = append(refsKey, k)
-				}
-			}
-			for _, validErr := range v.ValidateCommand(node.ToDriverParams(), refsKey) {
-				errs = append(errs, fmt.Errorf("%s %s: %s", node.Action, node.Entity, validErr.Error()))
-			}
+		if err := params.Validate(node.ParamsSpec().Validators(), node.ParamNodes); err != nil {
+			return cmdErr(node, err)
 		}
 		return nil
 	}
-	if err := tpl.visitCommandNodesE(collectValidationErrs); err != nil {
-		return tpl, env, err
-	}
-	switch len(errs) {
-	case 0:
-		return tpl, env, nil
-	case 1:
-		return tpl, env, fmt.Errorf("validation error: %s", errs[0])
-	default:
-		var errsSrings []string
-		for _, err := range errs {
-			if err != nil {
-				errsSrings = append(errsSrings, err.Error())
-			}
-		}
-		return tpl, env, fmt.Errorf("validation errors:\n\t- %s", strings.Join(errsSrings, "\n\t- "))
-	}
+	err := tpl.visitCommandNodesE(collectValidationErrs)
+	return tpl, cenv, err
 }
 
-func injectCommandsPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	for _, node := range tpl.CommandNodesIterator() {
-		key := fmt.Sprintf("%s%s", node.Action, node.Entity)
-		node.Command = env.Lookuper(key).(ast.Command)
-		if node.Command == nil {
-			return tpl, env, fmt.Errorf("inject: cannot find command for '%s'", key)
-		}
-	}
-	return tpl, env, nil
+func checkInvalidReferenceDeclarationsPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	return tpl, cenv, ast.VerifyRefs(tpl.AST)
 }
 
-func checkInvalidReferenceDeclarationsPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	usedRefs := make(map[string]struct{})
-
-	for _, withRef := range tpl.WithRefsIterator() {
-		for _, ref := range withRef.GetRefs() {
-			usedRefs[ref] = struct{}{}
-		}
-	}
-
-	knownRefs := make(map[string]bool)
-
-	var each = func(withRef ast.WithRefs) error {
-		for _, ref := range withRef.GetRefs() {
-			if _, ok := knownRefs[ref]; !ok {
-				return fmt.Errorf("using reference '$%s' but '%s' is undefined in template\n", ref, ref)
-			}
-		}
-		return nil
-	}
-
-	for _, st := range tpl.Statements {
-		switch n := st.Node.(type) {
-		case ast.WithRefs:
-			if err := each(n); err != nil {
-				return tpl, env, err
-			}
-		case *ast.DeclarationNode:
-			expr := st.Node.(*ast.DeclarationNode).Expr
-			switch nn := expr.(type) {
-			case ast.WithRefs:
-				if err := each(nn); err != nil {
-					return tpl, env, err
-				}
-			}
-		}
-		if decl, isDecl := st.Node.(*ast.DeclarationNode); isDecl {
-			ref := decl.Ident
-			if _, ok := knownRefs[ref]; ok {
-				return tpl, env, fmt.Errorf("using reference '$%s' but '%s' has already been assigned in template\n", ref, ref)
-			}
-			knownRefs[ref] = true
-		}
-	}
-
-	return tpl, env, nil
-}
-
-func inlineVariableValuePass(tpl *Template, env *Env) (*Template, *Env, error) {
+func inlineVariableValuePass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
 	newTpl := &Template{ID: tpl.ID, AST: tpl.AST.Clone()}
 	newTpl.Statements = []*ast.Statement{}
 
 	for i, st := range tpl.Statements {
 		decl, isDecl := st.Node.(*ast.DeclarationNode)
 		if isDecl {
-			value, isValue := decl.Expr.(*ast.ValueNode)
-			if isValue {
-				if val := value.Value.Value(); val != nil {
-					env.ResolvedVariables[decl.Ident] = val
+			if right, isRightExpr := decl.Expr.(*ast.RightExpressionNode); isRightExpr {
+				if res := right.Result(); res != nil {
+					cenv.Push(env.RESOLVED_VARS, map[string]interface{}{decl.Ident: res})
 				}
-				for j := i + 1; j < len(tpl.Statements); j++ {
-					expr := extractExpressionNode(tpl.Statements[j])
-					if expr != nil {
-						if withRef, ok := expr.(ast.WithRefs); ok {
-							withRef.ReplaceRef(decl.Ident, value.Value)
-						}
-					}
-				}
-				if value.IsResolved() {
-					continue
-				}
+				ast.ProcessRefs(
+					&ast.AST{Statements: tpl.Statements[i+1:]},
+					map[string]interface{}{decl.Ident: right.Node()},
+				)
+				continue
 			}
 		}
+
 		newTpl.Statements = append(newTpl.Statements, st)
 	}
-	return newTpl, env, nil
+	return newTpl, cenv, nil
 }
 
-func resolveHolesPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	tpl.visitHoles(func(h ast.WithHoles) {
-		processed := h.ProcessHoles(env.Fillers)
-		env.addToProcessedFillers(processed)
+func resolveHolesPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	processed := ast.ProcessHoles(tpl.AST, cenv.Get(env.FILLERS))
+	cenv.Push(env.PROCESSED_FILLERS, processed)
+
+	return tpl, cenv, nil
+}
+
+func resolveMissingHolesPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	uniqueHoles := ast.CollectUniqueHoles(tpl.AST)
+
+	var sortedHoles []ast.HoleNode
+	for hole := range uniqueHoles {
+		sortedHoles = append(sortedHoles, hole)
+	}
+	sort.Slice(sortedHoles, func(i, j int) bool {
+		a := sortedHoles[i]
+		b := sortedHoles[j]
+
+		if a.IsOptional() == b.IsOptional() {
+			return a.Hole() < b.Hole()
+		} else {
+			if a.IsOptional() {
+				return false
+			}
+			return true
+		}
 	})
 
-	return tpl, env, nil
-}
-
-func resolveMissingHolesPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	uniqueHoles := make(map[string][]string)
-	tpl.visitHoles(func(h ast.WithHoles) {
-		for k, v := range h.GetHoles() {
-			uniqueHoles[k] = nil
-			for _, vv := range v {
-				if !contains(uniqueHoles[k], vv) {
-					uniqueHoles[k] = append(uniqueHoles[k], vv)
+	for _, hole := range sortedHoles {
+		k := hole.Hole()
+		if cenv.MissingHolesFunc() != nil {
+			actual := cenv.MissingHolesFunc()(k, uniqueHoles[hole], hole.IsOptional())
+			if actual == "" && hole.IsOptional() {
+				continue
+			}
+			params, err := ParseParams(fmt.Sprintf("%s=%s", k, actual))
+			if err != nil {
+				if params, err = ParseParams(fmt.Sprintf("%s=%s", k, ast.Quote(actual))); err != nil {
+					return tpl, cenv, err
 				}
 			}
-		}
-	})
-	var sortedHoles []string
-	for k := range uniqueHoles {
-		sortedHoles = append(sortedHoles, k)
-	}
-	sort.Strings(sortedHoles)
-	fillers := make(map[string]interface{})
-
-	for _, k := range sortedHoles {
-		if env.MissingHolesFunc != nil {
-			actual := env.MissingHolesFunc(k, uniqueHoles[k])
-			fillers[k] = actual
+			cenv.Push(env.FILLERS, map[string]interface{}{k: params[k]})
 		}
 	}
 
-	tpl.visitHoles(func(h ast.WithHoles) {
-		processed := h.ProcessHoles(fillers)
-		env.addToProcessedFillers(processed)
-	})
+	processed := ast.ProcessHoles(tpl.AST, cenv.Get(env.FILLERS))
+	cenv.Push(env.PROCESSED_FILLERS, processed)
 
-	return tpl, env, nil
+	return tpl, cenv, nil
 }
 
-func resolveAliasPass(tpl *Template, env *Env) (*Template, *Env, error) {
+func removeOptionalHolesPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	ast.RemoveOptionalHoles(tpl.AST)
+	return tpl, cenv, nil
+}
+
+func resolveAliasPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
 	var emptyResolv []string
-	resolvAliasFunc := func(entity string, key string) func(string) (string, bool) {
+	resolvAliasFunc := func(action, entity string, key string) func(string) (string, bool) {
 		return func(alias string) (string, bool) {
-			if env.AliasFunc == nil {
+			if cenv.AliasFunc() == nil {
 				return "", false
 			}
-			actual := env.AliasFunc(entity, key, alias)
+			normalized := fmt.Sprintf("%s.%s.%s", action, entity, key)
+			actual := cenv.AliasFunc()(normalized, alias)
 			if actual == "" {
 				emptyResolv = append(emptyResolv, alias)
 				return "", false
 			} else {
-				env.Log.ExtraVerbosef("alias: resolved '%s' to '%s' for key %s", alias, actual, key)
+				cenv.Log().ExtraVerbosef("alias: resolved '%s' to '%s' for key %s", alias, actual, key)
 				return actual, true
 			}
 		}
 	}
 
-	for _, expr := range tpl.expressionNodesIterator() {
-		switch ee := expr.(type) {
-		case *ast.CommandNode:
-			for k, v := range ee.Params {
-				if vv, ok := v.(ast.WithAlias); ok {
-					vv.ResolveAlias(resolvAliasFunc(ee.Entity, k))
-				}
-			}
-		case *ast.ValueNode:
-			if vv, ok := ee.Value.(ast.WithAlias); ok {
-				vv.ResolveAlias(resolvAliasFunc("", ""))
-			}
-		}
+	ast.ProcessAliases(tpl.AST, resolvAliasFunc)
+
+	switch len(emptyResolv) {
+	case 0:
+		break
+	case 1:
+		return tpl, cenv, fmt.Errorf("cannot resolve alias \"%s\". Not found in locally synced data.", emptyResolv[0])
+	default:
+		return tpl, cenv, fmt.Errorf("cannot resolve aliases: %q. Not found in locally synced data.", emptyResolv)
+
 	}
 
-	if len(emptyResolv) > 0 {
-		return tpl, env, fmt.Errorf("cannot resolve aliases: %q. Maybe you need to update your local model with `awless sync` ?", emptyResolv)
-	}
-
-	return tpl, env, nil
+	return tpl, cenv, nil
 }
 
-func failOnUnresolvedHolesPass(tpl *Template, env *Env) (*Template, *Env, error) {
+func failOnUnresolvedHolesPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
 	uniqueUnresolved := make(map[string]struct{})
-	tpl.visitHoles(func(withHole ast.WithHoles) {
-		for hole := range withHole.GetHoles() {
-			uniqueUnresolved[hole] = struct{}{}
-		}
-	})
+	for _, hole := range ast.CollectHoles(tpl.AST) {
+		uniqueUnresolved[hole.String()] = struct{}{}
+	}
 
 	var unresolved []string
 	for k := range uniqueUnresolved {
@@ -500,51 +379,30 @@ func failOnUnresolvedHolesPass(tpl *Template, env *Env) (*Template, *Env, error)
 
 	if len(unresolved) > 0 {
 		sort.Strings(unresolved)
-		return tpl, env, fmt.Errorf("template contains unresolved holes: %v", unresolved)
+		return tpl, cenv, fmt.Errorf("template contains unresolved holes: %v", unresolved)
 	}
 
-	return tpl, env, nil
+	return tpl, cenv, nil
 }
 
-func failOnUnresolvedAliasPass(tpl *Template, env *Env) (*Template, *Env, error) {
-	var unresolved []string
+func failOnUnresolvedAliasPass(tpl *Template, cenv env.Compiling) (*Template, env.Compiling, error) {
+	uniqueUnresolved := make(map[string]struct{})
 
-	visitAliases := func(withAlias ast.WithAlias) {
-		for _, alias := range withAlias.GetAliases() {
-			unresolved = append(unresolved, alias)
-		}
+	for _, alias := range ast.CollectAliases(tpl.AST) {
+		uniqueUnresolved[alias.String()] = struct{}{}
 	}
 
-	for _, n := range tpl.expressionNodesIterator() {
-		switch nn := n.(type) {
-		case *ast.ValueNode:
-			if withAlias, ok := nn.Value.(ast.WithAlias); ok {
-				visitAliases(withAlias)
-			}
-		case *ast.CommandNode:
-			for _, param := range nn.Params {
-				if withAlias, ok := param.(ast.WithAlias); ok {
-					visitAliases(withAlias)
-				}
-			}
-		}
+	var unresolved []string
+	for k := range uniqueUnresolved {
+		unresolved = append(unresolved, k)
 	}
 
 	if len(unresolved) > 0 {
-		return tpl, env, fmt.Errorf("template contains unresolved alias: %v", unresolved)
+		sort.Strings(unresolved)
+		return tpl, cenv, fmt.Errorf("template contains unresolved alias: %v", unresolved)
 	}
 
-	return tpl, env, nil
-}
-
-func foundIn(key string, slice []string) (found bool) {
-	for _, k := range slice {
-		if k == key {
-			found = true
-			break
-		}
-	}
-	return
+	return tpl, cenv, nil
 }
 
 func cmdErr(cmd *ast.CommandNode, i interface{}, a ...interface{}) error {
@@ -574,4 +432,13 @@ func contains(arr []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func excludeFromSlice(in []string, exclude []string) (out []string) {
+	for _, v := range in {
+		if !contains(exclude, v) {
+			out = append(out, v)
+		}
+	}
+	return out
 }

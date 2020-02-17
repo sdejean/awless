@@ -68,6 +68,14 @@ func MustParse(text string) *Template {
 }
 
 func ParseParams(text string) (map[string]interface{}, error) {
+	node, err := parseParamsAsCommandNode(text)
+	if err != nil {
+		return nil, err
+	}
+	return node.ToFillerParams(), nil
+}
+
+func parseParamsAsCommandNode(text string) (*ast.CommandNode, error) {
 	full := fmt.Sprintf("none none %s", text)
 	n, err := parseStatement(full)
 	if err != nil {
@@ -76,7 +84,7 @@ func ParseParams(text string) (map[string]interface{}, error) {
 
 	switch n.(type) {
 	case *ast.CommandNode:
-		return (n.(*ast.CommandNode)).ToFillerParams(), nil
+		return (n.(*ast.CommandNode)), nil
 	default:
 		return nil, fmt.Errorf("parse params: expected a command node")
 	}

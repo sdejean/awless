@@ -22,6 +22,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ec2/ec2iface"
 	"github.com/wallix/awless/console"
@@ -33,30 +37,33 @@ const keyDirEnv = "__AWLESS_KEYS_DIR"
 type CreateKeypair struct {
 	_                 string `action:"create" entity:"keypair" awsAPI:"ec2" awsCall:"ImportKeyPair" awsInput:"ec2.ImportKeyPairInput" awsOutput:"ec2.ImportKeyPairOutput"`
 	logger            *logger.Logger
+	graph             cloud.GraphAPI
 	api               ec2iface.EC2API
-	Name              *string `awsName:"KeyName" awsType:"awsstr" templateName:"name" required:""`
+	Name              *string `awsName:"KeyName" awsType:"awsstr" templateName:"name"`
 	Encrypted         *bool   `templateName:"encrypted"`
 	PublicKeyMaterial []byte  `awsName:"PublicKeyMaterial" awsType:"awsbyteslice"`
 }
 
-func (cmd *CreateKeypair) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateKeypair) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("name"), params.Opt("encrypted")),
+		params.Validators{
+			"name": func(i interface{}, others map[string]interface{}) error {
+				keyDir := os.Getenv(keyDirEnv)
+				if keyDir == "" {
+					return fmt.Errorf("empty env var '%s'", keyDirEnv)
+				}
+
+				privKeyPath := filepath.Join(keyDir, fmt.Sprint(i)+".pem")
+				if _, err := os.Stat(privKeyPath); err == nil {
+					return fmt.Errorf("file already exists at path: %s", privKeyPath)
+				}
+				return nil
+			},
+		})
 }
 
-func (cmd *CreateKeypair) Validate_Name() error {
-	keyDir := os.Getenv(keyDirEnv)
-	if keyDir == "" {
-		return fmt.Errorf("empty env var '%s'", keyDirEnv)
-	}
-
-	privKeyPath := filepath.Join(keyDir, StringValue(cmd.Name)+".pem")
-	if _, err := os.Stat(privKeyPath); err == nil {
-		return fmt.Errorf("file already exists at path: %s", privKeyPath)
-	}
-	return nil
-}
-
-func (cmd *CreateKeypair) BeforeRun(ctx map[string]interface{}) error {
+func (cmd *CreateKeypair) BeforeRun(renv env.Running) error {
 	var encryptedMsg string
 	var encrypted bool
 
@@ -65,22 +72,22 @@ func (cmd *CreateKeypair) BeforeRun(ctx map[string]interface{}) error {
 		encryptedMsg = " encrypted"
 	}
 
-	cmd.logger.Infof("Generating locally a%s RSA 4096 bits keypair...", encryptedMsg)
+	privKeyPath := filepath.Join(os.Getenv(keyDirEnv), StringValue(cmd.Name)+".pem")
+	if _, err := os.Stat(privKeyPath); err == nil {
+		return fmt.Errorf("saving private key: file already exists at path: %s", privKeyPath)
+	}
+
+	cmd.logger.Infof("Generating locally%s 4096 RSA at %s", encryptedMsg, privKeyPath)
 	start := time.Now()
 	pub, priv, err := console.GenerateSSHKeyPair(4096, encrypted)
 	cmd.logger.ExtraVerbosef("4096 bits key generation took %s", time.Since(start))
 	if err != nil {
 		return fmt.Errorf("generating key: %s", err)
 	}
-	privKeyPath := filepath.Join(os.Getenv(keyDirEnv), StringValue(cmd.Name)+".pem")
-	if _, err = os.Stat(privKeyPath); err == nil {
-		return fmt.Errorf("saving private key: file already exists at path: %s", privKeyPath)
-	}
 	if err = ioutil.WriteFile(privKeyPath, priv, 0400); err != nil {
 		return fmt.Errorf("saving private key: %s", err)
 	}
 	cmd.PublicKeyMaterial = pub
-	cmd.logger.Infof("4096 RSA keypair generated locally and stored%s in '%s'", encryptedMsg, privKeyPath)
 	return nil
 }
 
@@ -91,10 +98,11 @@ func (cmd *CreateKeypair) ExtractResult(i interface{}) string {
 type DeleteKeypair struct {
 	_      string `action:"delete" entity:"keypair" awsAPI:"ec2" awsCall:"DeleteKeyPair" awsInput:"ec2.DeleteKeyPairInput" awsOutput:"ec2.DeleteKeyPairOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	Name   *string `awsName:"KeyName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"KeyName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DeleteKeypair) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteKeypair) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }

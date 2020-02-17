@@ -16,9 +16,12 @@ limitations under the License.
 package awsspec
 
 import (
-	"errors"
 	"fmt"
 	"time"
+
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
 
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -30,6 +33,7 @@ import (
 type CreateDatabase struct {
 	_      string `action:"create" entity:"database" awsAPI:"rds"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    rdsiface.RDSAPI
 
 	// Required for DB
@@ -75,80 +79,72 @@ type CreateDatabase struct {
 	CopyTagsToSnapshot *string `awsName:"CopyTagsToSnapshot" awsType:"awsbool" templateName:"copytagstosnapshot"`
 }
 
-func (cmd *CreateDatabase) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree: oneOf(allOf(node("type"), node("id"), node("engine"), node("password"), node("username"), node("size")), allOf(node("replica"), node("replica-source"))),
-		extras: []string{"autoupgrade", "availabilityzone", "backupretention", "cluster", "dbname", "parametergroup",
+func (cmd *CreateDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(params.OnlyOneOf(
+		params.AllOf(params.Key("type"), params.Key("id"), params.Key("engine"), params.Key("password"), params.Key("username"), params.Key("size")),
+		params.AllOf(params.Key("replica"), params.Key("replica-source")),
+		params.Opt("autoupgrade", "availabilityzone", "backupretention", "cluster", "dbname", "parametergroup",
 			"dbsecuritygroups", "subnetgroup", "domain", "iamrole", "version", "iops", "license", "multiaz", "optiongroup",
-			"port", "backupwindow", "maintenancewindow", "public", "encrypted", "storagetype", "timezone", "vpcsecuritygroups"},
-	}.verify(params)
+			"port", "backupwindow", "maintenancewindow", "public", "encrypted", "storagetype", "timezone", "vpcsecuritygroups")),
+		params.Validators{
+			"password": params.MinLengthOf(8),
+			"replica": func(i interface{}, others map[string]interface{}) error {
+				msg := "param not allowed in replica (either not applicable or directly inherited from the source DB)"
+				if _, ok := others["backupretention"]; ok {
+					return fmt.Errorf("'backupretention' %s", msg)
+				}
+				if _, ok := others["backupwindow"]; ok {
+					return fmt.Errorf("'backupwindow' %s", msg)
+				}
+				if _, ok := others["cluster"]; ok {
+					return fmt.Errorf("'cluster' %s", msg)
+				}
+				if _, ok := others["dbname"]; ok {
+					return fmt.Errorf("'dbname' %s", msg)
+				}
+				if _, ok := others["dbsecuritygroups"]; ok {
+					return fmt.Errorf("'dbsecuritygroups' %s", msg)
+				}
+				if _, ok := others["domain"]; ok {
+					return fmt.Errorf("'domain' %s", msg)
+				}
+				if _, ok := others["encrypted"]; ok {
+					return fmt.Errorf("'encrypted' %s", msg)
+				}
+				if _, ok := others["iamrole"]; ok {
+					return fmt.Errorf("'iamrole' %s", msg)
+				}
+				if _, ok := others["license"]; ok {
+					return fmt.Errorf("'license' %s", msg)
+				}
+				if _, ok := others["maintenancewindow"]; ok {
+					return fmt.Errorf("'maintenancewindow' %s", msg)
+				}
+				if _, ok := others["multiaz"]; ok {
+					return fmt.Errorf("'multiaz' %s", msg)
+				}
+				if _, ok := others["parametergroup"]; ok {
+					return fmt.Errorf("'parametergroup' %s", msg)
+				}
+				if _, ok := others["timezone"]; ok {
+					return fmt.Errorf("'timezone' %s", msg)
+				}
+				if _, ok := others["vpcsecuritygroups"]; ok {
+					return fmt.Errorf("'vpcsecuritygroups' %s", msg)
+				}
+				if _, ok := others["version"]; ok {
+					return fmt.Errorf("'version' %s", msg)
+				}
+				return nil
+			},
+		},
+	)
 }
 
-func (cmd *CreateDatabase) Validate_Password() (err error) {
-	if pass := cmd.Password; pass != nil {
-		if len(*pass) < 8 {
-			err = errors.New("should at least be 8 characters")
-		}
-	}
-	return
-}
-
-func (cmd *CreateDatabase) Validate_ReadReplicaIdentifier() error {
-	if cmd.ReadReplicaIdentifier != nil {
-		msg := "param not allowed in replica (either not applicable or directly inherited from the source DB)"
-		if cmd.Backupretention != nil {
-			return fmt.Errorf("'backupretention' %s", msg)
-		}
-		if cmd.Backupwindow != nil {
-			return fmt.Errorf("'backupwindow' %s", msg)
-		}
-		if cmd.Cluster != nil {
-			return fmt.Errorf("'cluster' %s", msg)
-		}
-		if cmd.Dbname != nil {
-			return fmt.Errorf("'dbname' %s", msg)
-		}
-		if cmd.Dbsecuritygroups != nil {
-			return fmt.Errorf("'dbsecuritygroups' %s", msg)
-		}
-		if cmd.Domain != nil {
-			return fmt.Errorf("'domain' %s", msg)
-		}
-		if cmd.Encrypted != nil {
-			return fmt.Errorf("'encrypted' %s", msg)
-		}
-		if cmd.Iamrole != nil {
-			return fmt.Errorf("'iamrole' %s", msg)
-		}
-		if cmd.License != nil {
-			return fmt.Errorf("'license' %s", msg)
-		}
-		if cmd.Maintenancewindow != nil {
-			return fmt.Errorf("'maintenancewindow' %s", msg)
-		}
-		if cmd.Multiaz != nil {
-			return fmt.Errorf("'multiaz' %s", msg)
-		}
-		if cmd.Parametergroup != nil {
-			return fmt.Errorf("'parametergroup' %s", msg)
-		}
-		if cmd.Timezone != nil {
-			return fmt.Errorf("'timezone' %s", msg)
-		}
-		if cmd.Vpcsecuritygroups != nil {
-			return fmt.Errorf("'vpcsecuritygroups' %s", msg)
-		}
-		if cmd.Version != nil {
-			return fmt.Errorf("'version' %s", msg)
-		}
-	}
-	return nil
-}
-
-func (cmd *CreateDatabase) ManualRun(ctx map[string]interface{}) (output interface{}, err error) {
+func (cmd *CreateDatabase) ManualRun(renv env.Running) (output interface{}, err error) {
 	if replica := cmd.ReadReplicaIdentifier; replica != nil {
 		input := &rds.CreateDBInstanceReadReplicaInput{}
-		if ierr := structInjector(cmd, input, ctx); ierr != nil {
+		if ierr := structInjector(cmd, input, renv.Context()); ierr != nil {
 			return nil, fmt.Errorf("cannot inject in rds.CreateDBInstanceReadReplicaInput: %s", ierr)
 		}
 		start := time.Now()
@@ -156,7 +152,7 @@ func (cmd *CreateDatabase) ManualRun(ctx map[string]interface{}) (output interfa
 		cmd.logger.ExtraVerbosef("rds.CreateDBInstanceReadReplica call took %s", time.Since(start))
 	} else {
 		input := &rds.CreateDBInstanceInput{}
-		if ierr := structInjector(cmd, input, ctx); ierr != nil {
+		if ierr := structInjector(cmd, input, renv.Context()); ierr != nil {
 			return nil, fmt.Errorf("cannot inject in rds.CreateDBInstanceInput: %s", ierr)
 		}
 		start := time.Now()
@@ -184,48 +180,42 @@ func (cmd *CreateDatabase) ExtractResult(i interface{}) string {
 type DeleteDatabase struct {
 	_            string `action:"delete" entity:"database" awsAPI:"rds" awsCall:"DeleteDBInstance" awsInput:"rds.DeleteDBInstanceInput" awsOutput:"rds.DeleteDBInstanceOutput"`
 	logger       *logger.Logger
+	graph        cloud.GraphAPI
 	api          rdsiface.RDSAPI
-	Id           *string `awsName:"DBInstanceIdentifier" awsType:"awsstr" templateName:"id" required:""`
+	Id           *string `awsName:"DBInstanceIdentifier" awsType:"awsstr" templateName:"id"`
 	SkipSnapshot *bool   `awsName:"SkipFinalSnapshot" awsType:"awsbool" templateName:"skip-snapshot"`
 	Snapshot     *string `awsName:"FinalDBSnapshotIdentifier" awsType:"awsstr" templateName:"snapshot"`
 }
 
-func (cmd *DeleteDatabase) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"),
+		params.Opt("skip-snapshot", "snapshot"),
+	))
 }
 
 type CheckDatabase struct {
 	_       string `action:"check" entity:"database" awsAPI:"rds"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     rdsiface.RDSAPI
-	Id      *string `templateName:"id" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Id      *string `templateName:"id"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckDatabase) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("available",
+				"backing-up", "creating", "deleting", "failed", "maintenance", "modifying",
+				"rebooting", "renaming", "resetting-master-credentials", "restore-error",
+				"storage-full", "upgrading", notFoundState),
+		},
+	)
 }
 
-func (cmd *CheckDatabase) Validate_State() error {
-	return NewEnumValidator(
-		"available",
-		"backing-up",
-		"creating",
-		"deleting",
-		"failed",
-		"maintenance",
-		"modifying",
-		"rebooting",
-		"renaming",
-		"resetting-master-credentials",
-		"restore-error",
-		"storage-full",
-		"upgrading",
-		notFoundState).Validate(cmd.State)
-}
-
-func (cmd *CheckDatabase) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckDatabase) ManualRun(renv env.Running) (interface{}, error) {
 	input := &rds.DescribeDBInstancesInput{
 		DBInstanceIdentifier: cmd.Id,
 	}
@@ -259,4 +249,41 @@ func (cmd *CheckDatabase) ManualRun(ctx map[string]interface{}) (interface{}, er
 		logger: cmd.logger,
 	}
 	return nil, c.check()
+}
+
+type StartDatabase struct {
+	_      string `action:"start" entity:"database" awsAPI:"rds" awsCall:"StartDBInstance" awsInput:"rds.StartDBInstanceInput" awsOutput:"rds.StartDBInstanceOutput"`
+	logger *logger.Logger
+	graph  cloud.GraphAPI
+	api    rdsiface.RDSAPI
+	Id     *string `awsName:"DBInstanceIdentifier" awsType:"awsstr" templateName:"id"`
+}
+
+func (cmd *StartDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
+}
+
+type StopDatabase struct {
+	_      string `action:"stop" entity:"database" awsAPI:"rds" awsCall:"StopDBInstance" awsInput:"rds.StopDBInstanceInput" awsOutput:"rds.StopDBInstanceOutput"`
+	logger *logger.Logger
+	graph  cloud.GraphAPI
+	api    rdsiface.RDSAPI
+	Id     *string `awsName:"DBInstanceIdentifier" awsType:"awsstr" templateName:"id"`
+}
+
+func (cmd *StopDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
+}
+
+type RestartDatabase struct {
+	_            string `action:"restart" entity:"database" awsAPI:"rds" awsCall:"RebootDBInstance" awsInput:"rds.RebootDBInstanceInput" awsOutput:"rds.RebootDBInstanceOutput"`
+	logger       *logger.Logger
+	graph        cloud.GraphAPI
+	api          rdsiface.RDSAPI
+	Id           *string `awsName:"DBInstanceIdentifier" awsType:"awsstr" templateName:"id"`
+	WithFailover *bool   `awsName:"ForceFailover" awsType:"awsbool" templateName:"with-failover"`
+}
+
+func (cmd *RestartDatabase) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"), params.Opt("with-failover")))
 }

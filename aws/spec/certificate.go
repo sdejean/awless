@@ -20,6 +20,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/acm"
@@ -30,28 +34,31 @@ import (
 type CreateCertificate struct {
 	_                 string `action:"create" entity:"certificate" awsAPI:"acm"`
 	logger            *logger.Logger
+	graph             cloud.GraphAPI
 	api               acmiface.ACMAPI
-	Domains           []*string `templateName:"domains" required:""`
+	Domains           []*string `templateName:"domains"`
 	ValidationDomains []*string `templateName:"validation-domains"`
 }
 
-func (cmd *CreateCertificate) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateCertificate) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("domains"),
+		params.Opt("validation-domains"),
+	))
 }
 
-func (cmd *CreateCertificate) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CreateCertificate) ManualRun(renv env.Running) (interface{}, error) {
 	input := &acm.RequestCertificateInput{}
 	domains := awssdk.StringValueSlice(cmd.Domains)
 	if len(domains) == 0 {
 		return nil, fmt.Errorf("'domains' must contain at least one element")
 	}
 	// Required params
-	err := setFieldWithType(domains[0], input, "DomainName", awsstr, ctx)
+	err := setFieldWithType(domains[0], input, "DomainName", awsstr, renv.Context())
 	if err != nil {
 		return nil, err
 	}
 	if len(domains) > 1 {
-		if err = setFieldWithType(domains[1:], input, "SubjectAlternativeNames", awsstringslice, ctx); err != nil {
+		if err = setFieldWithType(domains[1:], input, "SubjectAlternativeNames", awsstringslice, renv.Context()); err != nil {
 			return nil, err
 		}
 	}
@@ -102,32 +109,34 @@ func (cmd *CreateCertificate) ExtractResult(i interface{}) string {
 type DeleteCertificate struct {
 	_      string `action:"delete" entity:"certificate" awsAPI:"acm" awsCall:"DeleteCertificate" awsInput:"acm.DeleteCertificateInput" awsOutput:"acm.DeleteCertificateOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    acmiface.ACMAPI
-	Arn    *string `awsName:"CertificateArn" awsType:"awsstr" templateName:"arn" required:""`
+	Arn    *string `awsName:"CertificateArn" awsType:"awsstr" templateName:"arn"`
 }
 
-func (cmd *DeleteCertificate) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteCertificate) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("arn")))
 }
 
 type CheckCertificate struct {
 	_       string `action:"check" entity:"certificate" awsAPI:"acm"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     acmiface.ACMAPI
-	Arn     *string `templateName:"arn" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Arn     *string `templateName:"arn"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckCertificate) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckCertificate) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("arn"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("issued", "pending_validation", notFoundState),
+		})
 }
 
-func (cmd *CheckCertificate) Validate_State() error {
-	return NewEnumValidator("issued", "pending_validation", notFoundState).Validate(cmd.State)
-}
-
-func (cmd *CheckCertificate) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckCertificate) ManualRun(renv env.Running) (interface{}, error) {
 	input := &acm.DescribeCertificateInput{
 		CertificateArn: cmd.Arn,
 	}

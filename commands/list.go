@@ -28,7 +28,7 @@ import (
 	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/config"
 	"github.com/wallix/awless/console"
-	"github.com/wallix/awless/graph"
+	"github.com/wallix/awless/logger"
 	"github.com/wallix/awless/sync"
 )
 
@@ -92,18 +92,34 @@ var listSpecificResourceCmd = func(resType string) *cobra.Command {
 		Short: fmt.Sprintf("[%s] List %s %s", awsservices.ServicePerResourceType[resType], strings.ToUpper(awsservices.APIPerResourceType[resType]), cloud.PluralizeResource(resType)),
 
 		Run: func(cmd *cobra.Command, args []string) {
-			var g *graph.Graph
+			if len(args) > 0 {
+				var plural string
+				if len(args) > 1 {
+					plural = "s"
+				}
+				logger.Errorf("invalid parameter%s '%s'", plural, strings.Join(args, " "))
+				if strings.Contains(args[0], "=") {
+					if !promptConfirmDefaultYes("Did you mean `awless list %s --filter %s`? ", cloud.PluralizeResource(resType), strings.Join(args, " ")) {
+						os.Exit(1)
+					}
+					listingFiltersFlag = append(listingFiltersFlag, args...)
+				} else {
+					os.Exit(1)
+				}
+			}
+			var g cloud.GraphAPI
 
 			if localGlobalFlag {
 				if srvName, ok := awsservices.ServicePerResourceType[resType]; ok {
-					g = sync.LoadLocalGraphForService(srvName, config.GetAWSRegion())
+					g = sync.LoadLocalGraphForService(srvName, config.GetAWSProfile(), config.GetAWSRegion())
 				} else {
 					exitOn(fmt.Errorf("cannot find service for resource type %s", resType))
 				}
 			} else {
 				srv, err := cloud.GetServiceForType(resType)
 				exitOn(err)
-				g, err = srv.FetchByType(context.WithValue(context.Background(), "force", true), resType)
+				fetchContext := context.WithValue(context.Background(), "force", true)
+				g, err = srv.FetchByType(context.WithValue(fetchContext, "filters", listingFiltersFlag), resType)
 				exitOn(err)
 			}
 
@@ -119,7 +135,7 @@ var listAllResourceInServiceCmd = func(srvName string) *cobra.Command {
 		Hidden: true,
 
 		Run: func(cmd *cobra.Command, args []string) {
-			g := sync.LoadLocalGraphForService(srvName, config.GetAWSRegion())
+			g := sync.LoadLocalGraphForService(srvName, config.GetAWSProfile(), config.GetAWSRegion())
 			displayer, err := console.BuildOptions(
 				console.WithFormat(listingFormat),
 				console.WithMaxWidth(console.GetTerminalWidth()),
@@ -131,7 +147,7 @@ var listAllResourceInServiceCmd = func(srvName string) *cobra.Command {
 	}
 }
 
-func printResources(g *graph.Graph, resType string) {
+func printResources(g cloud.GraphAPI, resType string) {
 	displayer, err := console.BuildOptions(
 		console.WithRdfType(resType),
 		console.WithColumns(listingColumnsFlag),

@@ -21,21 +21,21 @@ import (
 
 	"github.com/wallix/awless/aws/spec"
 	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/sync"
 )
 
 var (
 	AccessService, InfraService, StorageService, MessagingService, DnsService, LambdaService, MonitoringService, CdnService, CloudformationService cloud.Service
 )
 
-func Init(conf map[string]interface{}, log *logger.Logger, profileSetterCallback func(val string) error, enableNetworkMonitor bool) error {
-	awsconf := config(conf)
-	region := awsconf.region()
+func Init(profile, region string, extraConf map[string]interface{}, log *logger.Logger, profileSetterCallback func(val string) error, enableNetworkMonitor bool) error {
 	if region == "" {
 		return errors.New("empty AWS region. Set it with `awless config set aws.region`")
 	}
 
-	sb := newSessionResolver().withRegion(region).withProfile(awsconf.profile()).withNetworkMonitor(enableNetworkMonitor)
+	sb := newSessionResolver().withRegion(region).withProfile(profile).withNetworkMonitor(enableNetworkMonitor)
 	sb = sb.withProfileSetter(profileSetterCallback).withLogger(log).withCredentialResolvers()
 
 	sess, err := sb.resolve()
@@ -43,15 +43,15 @@ func Init(conf map[string]interface{}, log *logger.Logger, profileSetterCallback
 		return err
 	}
 
-	AccessService = NewAccess(sess, awsconf, log)
-	InfraService = NewInfra(sess, awsconf, log)
-	StorageService = NewStorage(sess, awsconf, log)
-	MessagingService = NewMessaging(sess, awsconf, log)
-	DnsService = NewDns(sess, awsconf, log)
-	LambdaService = NewLambda(sess, awsconf, log)
-	MonitoringService = NewMonitoring(sess, awsconf, log)
-	CdnService = NewCdn(sess, awsconf, log)
-	CloudformationService = NewCloudformation(sess, awsconf, log)
+	AccessService = NewAccess(sess, profile, extraConf, log)
+	InfraService = NewInfra(sess, profile, extraConf, log)
+	StorageService = NewStorage(sess, profile, extraConf, log)
+	MessagingService = NewMessaging(sess, profile, extraConf, log)
+	DnsService = NewDns(sess, profile, extraConf, log)
+	LambdaService = NewLambda(sess, profile, extraConf, log)
+	MonitoringService = NewMonitoring(sess, profile, extraConf, log)
+	CdnService = NewCdn(sess, profile, extraConf, log)
+	CloudformationService = NewCloudformation(sess, profile, extraConf, log)
 
 	cloud.ServiceRegistry[InfraService.Name()] = InfraService
 	cloud.ServiceRegistry[AccessService.Name()] = AccessService
@@ -66,7 +66,21 @@ func Init(conf map[string]interface{}, log *logger.Logger, profileSetterCallback
 	awsspec.CommandFactory = &awsspec.AWSFactory{
 		Log:  log,
 		Sess: sess,
+		Graph: &cloud.LazyGraph{LoadingFunc: func() cloud.GraphAPI {
+			g, err := sync.LoadLocalGraphs(profile, region)
+			if err != nil || g == nil {
+				g = graph.NewGraph()
+			}
+			return g
+		}},
 	}
 
 	return nil
+}
+
+func getBool(m map[string]interface{}, key string, def bool) bool {
+	if b, ok := m[key].(bool); ok {
+		return b
+	}
+	return def
 }

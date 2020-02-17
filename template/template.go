@@ -24,6 +24,7 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/oklog/ulid"
+	"github.com/wallix/awless/template/env"
 	"github.com/wallix/awless/template/internal/ast"
 )
 
@@ -32,7 +33,30 @@ type Template struct {
 	*ast.AST
 }
 
-func (s *Template) Run(env *Env) (*Template, error) {
+func (s *Template) DryRun(renv env.Running) (tpl *Template, err error) {
+	renv.SetDryRun(true)
+	defer renv.SetDryRun(false)
+
+	tpl, err = s.Run(renv)
+	if err != nil {
+		return
+	}
+
+	errs := &Errors{}
+	for _, cmd := range tpl.CommandNodesIterator() {
+		if cmderr := cmd.Err(); cmderr != nil {
+			errs.add(cmderr)
+		}
+	}
+
+	if _, any := errs.Errors(); any {
+		err = errs
+	}
+
+	return
+}
+
+func (s *Template) Run(renv env.Running) (*Template, error) {
 	vars := map[string]interface{}{}
 
 	current := &Template{AST: &ast.AST{}}
@@ -41,13 +65,10 @@ func (s *Template) Run(env *Env) (*Template, error) {
 	for _, sts := range s.Statements {
 		clone := sts.Clone()
 		current.Statements = append(current.Statements, clone)
-		ctx := map[string]interface{}{
-			"Variables":  env.ResolvedVariables,
-			"References": env.ResolvedVariables, // retro-compatibility with v0.1.2
-		}
 		switch n := clone.Node.(type) {
 		case *ast.CommandNode:
-			if stop := processCmdNode(env, n, vars, ctx); stop {
+			n.ProcessRefs(vars)
+			if stop := processCmdNode(renv, n); stop {
 				return current, nil
 			}
 		case *ast.DeclarationNode:
@@ -55,7 +76,8 @@ func (s *Template) Run(env *Env) (*Template, error) {
 			expr := n.Expr
 			switch n := expr.(type) {
 			case *ast.CommandNode:
-				if stop := processCmdNode(env, n, vars, ctx); stop {
+				n.ProcessRefs(vars)
+				if stop := processCmdNode(renv, n); stop {
 					return current, nil
 				}
 				vars[ident] = n.Result()
@@ -70,13 +92,12 @@ func (s *Template) Run(env *Env) (*Template, error) {
 	return current, nil
 }
 
-func processCmdNode(env *Env, n *ast.CommandNode, vars map[string]interface{}, ctx map[string]interface{}) bool {
-	n.ProcessRefs(vars)
-	if env.IsDryRun {
-		n.CmdResult, n.CmdErr = n.Command.DryRun(ctx, n.ToDriverParams())
-		n.CmdErr = prefixError(n.CmdErr, "dry run")
+func processCmdNode(renv env.Running, n *ast.CommandNode) bool {
+	if renv.IsDryRun() {
+		n.CmdResult, n.CmdErr = n.Command.Run(renv, n.ToDriverParams())
+		n.CmdErr = prefixError(n.CmdErr, fmt.Sprintf("dry run: %s %s", n.Action, n.Entity))
 	} else {
-		n.CmdResult, n.CmdErr = n.Run(ctx, n.ToDriverParams())
+		n.CmdResult, n.CmdErr = n.Run(renv, n.ToDriverParams())
 		var res, status string
 		if n.CmdResult != nil {
 			res = " (" + color.New(color.FgCyan).Sprint(n.CmdResult) + ") "
@@ -86,9 +107,9 @@ func processCmdNode(env *Env, n *ast.CommandNode, vars map[string]interface{}, c
 		} else {
 			status = color.New(color.FgGreen).Sprint("OK")
 		}
-		env.Log.Infof("%s %s %s%s", status, n.Action, n.Entity, res)
+		renv.Log().Infof("%s %s %s%s", status, n.Action, n.Entity, res)
 		if n.CmdErr != nil {
-			env.Log.MultiLineError(n.CmdErr)
+			renv.Log().MultiLineError(n.CmdErr)
 		}
 	}
 	return n.CmdErr != nil
@@ -135,14 +156,6 @@ func (t *Template) UniqueDefinitions(apis map[string]string) (res []string) {
 	return
 }
 
-func (s *Template) visitHoles(fn func(n ast.WithHoles)) {
-	for _, n := range s.expressionNodesIterator() {
-		if h, ok := n.(ast.WithHoles); ok {
-			fn(h)
-		}
-	}
-}
-
 func (s *Template) visitCommandNodes(fn func(n *ast.CommandNode)) {
 	for _, cmd := range s.CommandNodesIterator() {
 		fn(cmd)
@@ -157,18 +170,6 @@ func (s *Template) visitCommandNodesE(fn func(n *ast.CommandNode) error) error {
 	}
 
 	return nil
-}
-
-func (s *Template) visitCommandDeclarationNodes(fn func(n *ast.DeclarationNode)) {
-	for _, cmd := range s.commandDeclarationNodesIterator() {
-		fn(cmd)
-	}
-}
-
-func (s *Template) visitDeclarationNodes(fn func(n *ast.DeclarationNode)) {
-	for _, dcl := range s.declarationNodesIterator() {
-		fn(dcl)
-	}
 }
 
 func (s *Template) CommandNodesIterator() (nodes []*ast.CommandNode) {
@@ -187,22 +188,6 @@ func (s *Template) CommandNodesIterator() (nodes []*ast.CommandNode) {
 	return
 }
 
-func (s *Template) WithRefsIterator() (nodes []ast.WithRefs) {
-	for _, sts := range s.Statements {
-		switch nn := sts.Node.(type) {
-		case ast.WithRefs:
-			nodes = append(nodes, nn)
-		case *ast.DeclarationNode:
-			expr := sts.Node.(*ast.DeclarationNode).Expr
-			switch nnn := expr.(type) {
-			case *ast.CommandNode:
-				nodes = append(nodes, nnn)
-			}
-		}
-	}
-	return
-}
-
 func (s *Template) CommandNodesReverseIterator() (nodes []*ast.CommandNode) {
 	for i := len(s.Statements) - 1; i >= 0; i-- {
 		sts := s.Statements[i]
@@ -215,17 +200,6 @@ func (s *Template) CommandNodesReverseIterator() (nodes []*ast.CommandNode) {
 			case *ast.CommandNode:
 				nodes = append(nodes, expr.(*ast.CommandNode))
 			}
-		}
-	}
-	return
-}
-
-func (s *Template) commandDeclarationNodesIterator() (nodes []*ast.DeclarationNode) {
-	for _, node := range s.declarationNodesIterator() {
-		expr := node.Expr
-		switch expr.(type) {
-		case *ast.CommandNode:
-			nodes = append(nodes, node)
 		}
 	}
 	return

@@ -17,9 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
-	"io/ioutil"
-	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -38,15 +35,7 @@ func generateTestMocks() {
 		panic(err)
 	}
 
-	var buff bytes.Buffer
-	err = templ.Execute(&buff, aws.Mocks())
-	if err != nil {
-		panic(err)
-	}
-
-	if err := ioutil.WriteFile(filepath.Join(SERVICES_DIR, "gen_mocks_test.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, aws.Mocks(), SERVICES_DIR, "gen_mocks_test.go")
 }
 
 const mocksTempl = `// Auto generated implementation for the AWS cloud service
@@ -94,6 +83,10 @@ func (m * {{ $mock.Name }}) Region() string {
 	return ""
 }
 
+func (m * {{ $mock.Name }}) Profile() string {
+	return ""
+}
+
 func (m * {{ $mock.Name }}) Provider() string {
 	return ""
 }
@@ -106,7 +99,7 @@ func (m * {{ $mock.Name }}) ResourceTypes() []string {
 	return []string{}
 }
 
-func (m * {{ $mock.Name }}) Fetch(context.Context) (*graph.Graph, error) {
+func (m * {{ $mock.Name }}) Fetch(context.Context) (cloud.GraphAPI, error) {
 	return nil, nil
 }
 
@@ -114,7 +107,7 @@ func (m * {{ $mock.Name }}) IsSyncDisabled() bool {
 	return false
 }
 
-func (m * {{ $mock.Name }}) FetchByType(context.Context, string) (*graph.Graph, error) {
+func (m * {{ $mock.Name }}) FetchByType(context.Context, string) (cloud.GraphAPI, error) {
 	return nil, nil
 }
 

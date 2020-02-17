@@ -6,29 +6,29 @@ import (
 
 	"github.com/wallix/awless/aws/spec"
 	"github.com/wallix/awless/template"
+	"github.com/wallix/awless/template/env"
 )
 
 func Fuzz(data []byte) int {
 	var ok bool
 	for _, def := range awsspec.AWSTemplatesDefinitions {
-		env := template.NewEnv()
 		fillers := make(map[string]interface{})
-		for _, param := range def.RequiredParams {
+		for _, param := range def.Params.Required() {
 			fillers[param] = "default"
 		}
-		env.AddFillers(fillers)
 
-		env.AliasFunc = func(e, k, v string) string { return "" }
-		env.Lookuper = func(tokens ...string) interface{} {
-			return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
-		}
-		for _, param := range def.RequiredParams {
+		cenv := template.NewEnv().WithAliasFunc(func(p, v string) string { return "" }).
+			WithLookupCommandFunc(func(tokens ...string) interface{} {
+				return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+			}).Build()
+		cenv.Push(env.FILLERS, fillers)
+		for _, param := range def.Params.Required() {
 			inTpl, err := template.Parse(fmt.Sprintf("%s %s %s=%s", def.Action, def.Entity, param, string(data)))
 			if err != nil {
 				continue
 			}
 
-			_, _, err = template.Compile(inTpl, env, template.TestCompileMode)
+			_, _, err = template.Compile(inTpl, cenv, template.TestCompileMode)
 			if err != nil {
 				continue
 			}

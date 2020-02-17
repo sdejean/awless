@@ -22,7 +22,6 @@ import (
 	"text/tabwriter"
 
 	"github.com/wallix/awless/cloud"
-	"github.com/wallix/awless/graph"
 )
 
 type BucketSizer struct {
@@ -38,18 +37,18 @@ func (*BucketSizer) Name() string {
 	return "bucket_sizer"
 }
 
-func (i *BucketSizer) Inspect(g *graph.Graph) error {
+func (i *BucketSizer) Inspect(g cloud.GraphAPI) error {
 	i.buckets = make(map[string]*bucket)
 
-	objects, err := g.GetAllResources(cloud.S3Object)
+	objects, err := g.Find(cloud.NewQuery(cloud.S3Object))
 	if err != nil {
 		return err
 	}
 
 	for _, obj := range objects {
-		size := obj.Properties["Size"].(int)
+		size := obj.Properties()["Size"].(int)
 		i.total = i.total + size
-		name := obj.Properties["Bucket"].(string)
+		name := obj.Properties()["Bucket"].(string)
 		b := i.buckets[name]
 		if b == nil {
 			b = new(bucket)

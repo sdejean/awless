@@ -18,10 +18,13 @@ package awsspec
 import (
 	"errors"
 	"fmt"
-	"net"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
 
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
@@ -33,14 +36,15 @@ import (
 type CreateSecuritygroup struct {
 	_           string `action:"create" entity:"securitygroup" awsAPI:"ec2" awsCall:"CreateSecurityGroup" awsInput:"ec2.CreateSecurityGroupInput" awsOutput:"ec2.CreateSecurityGroupOutput" awsDryRun:""`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         ec2iface.EC2API
-	Name        *string `awsName:"GroupName" awsType:"awsstr" templateName:"name" required:""`
-	Vpc         *string `awsName:"VpcId" awsType:"awsstr" templateName:"vpc" required:""`
-	Description *string `awsName:"Description" awsType:"awsstr" templateName:"description" required:""`
+	Name        *string `awsName:"GroupName" awsType:"awsstr" templateName:"name"`
+	Vpc         *string `awsName:"VpcId" awsType:"awsstr" templateName:"vpc"`
+	Description *string `awsName:"Description" awsType:"awsstr" templateName:"description"`
 }
 
-func (cmd *CreateSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("description"), params.Key("name"), params.Key("vpc")))
 }
 
 func (cmd *CreateSecuritygroup) ExtractResult(i interface{}) string {
@@ -50,9 +54,10 @@ func (cmd *CreateSecuritygroup) ExtractResult(i interface{}) string {
 type UpdateSecuritygroup struct {
 	_             string `action:"update" entity:"securitygroup" awsAPI:"ec2" awsDryRun:"manual"`
 	logger        *logger.Logger
+	graph         cloud.GraphAPI
 	api           ec2iface.EC2API
-	Id            *string `templateName:"id" required:""`
-	Protocol      *string `templateName:"protocol" required:""`
+	Id            *string `templateName:"id"`
+	Protocol      *string `templateName:"protocol"`
 	CIDR          *string `templateName:"cidr"`
 	Securitygroup *string `templateName:"securitygroup"`
 	Inbound       *string `templateName:"inbound"`
@@ -60,39 +65,28 @@ type UpdateSecuritygroup struct {
 	Portrange     *string `templateName:"portrange"`
 }
 
-func (cmd *UpdateSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree:   allOf(node("id"), node("protocol"), oneOfE(node("inbound"), node("outbound")), oneOf(node("cidr"), node("securitygroup"))),
-		extras: []string{"portrange"},
-	}.verify(params)
+func (cmd *UpdateSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("protocol"), params.OnlyOneOf(params.Key("inbound"), params.Key("outbound")),
+			params.Opt(params.Suggested("cidr", "portrange"), "securitygroup")),
+		params.Validators{
+			"cidr":     params.IsCIDR,
+			"inbound":  params.IsInEnumIgnoreCase("authorize", "revoke"),
+			"outbound": params.IsInEnumIgnoreCase("authorize", "revoke"),
+			// Fail fast when protocol is TCP/UDP and port range is missing, instead of waiting
+			// for AWS server validation error:
+			//     InvalidParameterValue: Invalid value 'Must specify both from and to ports with TCP/UDP.' for portRange.
+			"protocol": func(protocol interface{}, others map[string]interface{}) error {
+				_, hasPortRange := others["portrange"]
+				if isTCPorUDP(fmt.Sprint(protocol)) && !hasPortRange {
+					return errors.New("missing 'portrange' when protocol is TCP/UDP")
+				}
+				return nil
+			},
+		})
 }
 
-func (cmd *UpdateSecuritygroup) Validate_CIDR() error {
-	_, _, err := net.ParseCIDR(StringValue(cmd.CIDR))
-	return err
-}
-
-// Fail fast when protocol is TCP/UDP and port range is missing, instead of waiting
-// for AWS server validation error:
-//     InvalidParameterValue: Invalid value 'Must specify both from and to ports with TCP/UDP.' for portRange.
-func (cmd *UpdateSecuritygroup) Validate_Protocol() error {
-	if p := cmd.Protocol; p != nil {
-		if isTCPorUDP(*p) && cmd.Portrange == nil {
-			return errors.New("missing 'portrange' when protocol is TCP/UDP")
-		}
-	}
-	return nil
-}
-
-func (cmd *UpdateSecuritygroup) Validate_Inbound() error {
-	return NewEnumValidator("authorize", "revoke").Validate(cmd.Inbound)
-}
-
-func (cmd *UpdateSecuritygroup) Validate_Outbound() error {
-	return NewEnumValidator("authorize", "revoke").Validate(cmd.Outbound)
-}
-
-func (cmd *UpdateSecuritygroup) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *UpdateSecuritygroup) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	if err := cmd.inject(params); err != nil {
 		return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 	}
@@ -142,7 +136,7 @@ func (cmd *UpdateSecuritygroup) DryRun(ctx, params map[string]interface{}) (inte
 	return nil, fmt.Errorf("dry run: update securitygroup: %s", err)
 }
 
-func (cmd *UpdateSecuritygroup) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *UpdateSecuritygroup) ManualRun(renv env.Running) (interface{}, error) {
 	ipPerms, err := cmd.buildIpPermissions()
 	if err != nil {
 		return nil, err
@@ -201,32 +195,34 @@ func (cmd *UpdateSecuritygroup) ManualRun(ctx map[string]interface{}) (interface
 type DeleteSecuritygroup struct {
 	_      string `action:"delete" entity:"securitygroup" awsAPI:"ec2" awsCall:"DeleteSecurityGroup" awsInput:"ec2.DeleteSecurityGroupInput" awsOutput:"ec2.DeleteSecurityGroupOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	Id     *string `awsName:"GroupId" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"GroupId" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }
 
 type CheckSecuritygroup struct {
 	_       string `action:"check" entity:"securitygroup" awsAPI:"ec2"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     ec2iface.EC2API
-	Id      *string `templateName:"id" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Id      *string `templateName:"id"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("unused"),
+		})
 }
 
-func (cmd *CheckSecuritygroup) Validate_State() error {
-	return NewEnumValidator("unused").Validate(cmd.State)
-}
-
-func (cmd *CheckSecuritygroup) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckSecuritygroup) ManualRun(renv env.Running) (interface{}, error) {
 	input := &ec2.DescribeNetworkInterfacesInput{
 		Filters: []*ec2.Filter{
 			{Name: String("group-id"), Values: []*string{cmd.Id}},
@@ -260,16 +256,17 @@ func (cmd *CheckSecuritygroup) ManualRun(ctx map[string]interface{}) (interface{
 type AttachSecuritygroup struct {
 	_        string `action:"attach" entity:"securitygroup" awsAPI:"ec2"`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Id       *string `templateName:"id" required:""`
-	Instance *string `templateName:"instance" required:""`
+	Id       *string `templateName:"id"`
+	Instance *string `templateName:"instance"`
 }
 
-func (cmd *AttachSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"), params.Key("instance")))
 }
 
-func (cmd *AttachSecuritygroup) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AttachSecuritygroup) ManualRun(renv env.Running) (interface{}, error) {
 	groups, err := fetchInstanceSecurityGroups(cmd.api, StringValue(cmd.Instance))
 	if err != nil {
 		return nil, fmt.Errorf("fetching securitygroups for instance %s: %s", StringValue(cmd.Instance), err)
@@ -291,16 +288,17 @@ func (cmd *AttachSecuritygroup) ManualRun(ctx map[string]interface{}) (interface
 type DetachSecuritygroup struct {
 	_        string `action:"detach" entity:"securitygroup" awsAPI:"ec2"`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Id       *string `templateName:"id" required:""`
-	Instance *string `templateName:"instance" required:""`
+	Id       *string `templateName:"id"`
+	Instance *string `templateName:"instance"`
 }
 
-func (cmd *DetachSecuritygroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachSecuritygroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id"), params.Key("instance")))
 }
 
-func (cmd *DetachSecuritygroup) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachSecuritygroup) ManualRun(renv env.Running) (interface{}, error) {
 	groups, err := fetchInstanceSecurityGroups(cmd.api, StringValue(cmd.Instance))
 	if err != nil {
 		return nil, fmt.Errorf("fetching securitygroups for instance %s: %s", StringValue(cmd.Instance), err)

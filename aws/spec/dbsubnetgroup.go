@@ -19,20 +19,23 @@ import (
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/rds"
 	"github.com/aws/aws-sdk-go/service/rds/rdsiface"
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/logger"
+	"github.com/wallix/awless/template/params"
 )
 
 type CreateDbsubnetgroup struct {
 	_           string `action:"create" entity:"dbsubnetgroup" awsAPI:"rds" awsCall:"CreateDBSubnetGroup" awsInput:"rds.CreateDBSubnetGroupInput" awsOutput:"rds.CreateDBSubnetGroupOutput"`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         rdsiface.RDSAPI
-	Name        *string   `awsName:"DBSubnetGroupName" awsType:"awsstr" templateName:"name" required:""`
-	Description *string   `awsName:"DBSubnetGroupDescription" awsType:"awsstr" templateName:"description" required:""`
-	Subnets     []*string `awsName:"SubnetIds" awsType:"awsstringslice" templateName:"subnets" required:""`
+	Name        *string   `awsName:"DBSubnetGroupName" awsType:"awsstr" templateName:"name"`
+	Description *string   `awsName:"DBSubnetGroupDescription" awsType:"awsstr" templateName:"description"`
+	Subnets     []*string `awsName:"SubnetIds" awsType:"awsstringslice" templateName:"subnets"`
 }
 
-func (cmd *CreateDbsubnetgroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateDbsubnetgroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("description"), params.Key("name"), params.Key("subnets")))
 }
 
 func (cmd *CreateDbsubnetgroup) ExtractResult(i interface{}) string {
@@ -42,10 +45,11 @@ func (cmd *CreateDbsubnetgroup) ExtractResult(i interface{}) string {
 type DeleteDbsubnetgroup struct {
 	_      string `action:"delete" entity:"dbsubnetgroup" awsAPI:"rds" awsCall:"DeleteDBSubnetGroup" awsInput:"rds.DeleteDBSubnetGroupInput" awsOutput:"rds.DeleteDBSubnetGroupOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    rdsiface.RDSAPI
-	Name   *string `awsName:"DBSubnetGroupName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"DBSubnetGroupName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DeleteDbsubnetgroup) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteDbsubnetgroup) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }

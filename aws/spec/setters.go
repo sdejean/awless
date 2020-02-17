@@ -18,7 +18,6 @@ package awsspec
 
 import (
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -29,6 +28,7 @@ import (
 	gotemplate "text/template"
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 
 	"bytes"
@@ -44,30 +44,33 @@ import (
 )
 
 const (
-	awsstr              = "awsstr"
-	awsint              = "awsint"
-	awsint64            = "awsint64"
-	awsfloat            = "awsfloat"
-	awsbool             = "awsbool"
-	awsboolattribute    = "awsboolattribute"
-	awsstringattribute  = "awsstringattribute"
-	awsint64slice       = "awsint64slice"
-	awsstringslice      = "awsstringslice"
-	awsstringpointermap = "awsstringpointermap"
-	awsslicestruct      = "awsslicestruct"
-	awsslicestructint64 = "awsslicestructint64"
-	awsfiletobase64     = "awsfiletobase64"
-	awsfiletobyteslice  = "awsfiletobyteslice"
-	awsfiletostring     = "awsfiletostring"
-	awsdimensionslice   = "awsdimensionslice"
-	awsparameterslice   = "awsparameterslice"
-	awsecskeyvalue      = "awsecskeyvalue"
-	awsportmappings     = "awsportmappings"
-	awssubnetmappings   = "awssubnetmappings"
-	awsstepadjustments  = "awsstepadjustments"
-	awscsvstr           = "awscsvstr"
-	aws6digitsstring    = "aws6digitsstring"
-	awsbyteslice        = "awsbyteslice"
+	awsstr                   = "awsstr"
+	awsint                   = "awsint"
+	awsint64                 = "awsint64"
+	awsfloat                 = "awsfloat"
+	awsbool                  = "awsbool"
+	awsboolattribute         = "awsboolattribute"
+	awsstringattribute       = "awsstringattribute"
+	awsint64slice            = "awsint64slice"
+	awsstringslice           = "awsstringslice"
+	awsstringpointermap      = "awsstringpointermap"
+	awsslicestruct           = "awsslicestruct"
+	awsslicestructint64      = "awsslicestructint64"
+	awsuserdatatobase64      = "awsuserdatatobase64"
+	awsfiletobyteslice       = "awsfiletobyteslice"
+	awsfiletostring          = "awsfiletostring"
+	awsdimensionslice        = "awsdimensionslice"
+	awsparameterslice        = "awsparameterslice"
+	awsecskeyvalue           = "awsecskeyvalue"
+	awsportmappings          = "awsportmappings"
+	awssubnetmappings        = "awssubnetmappings"
+	awsclassicloadblisteners = "awsclassicloadblisteners"
+	awsstepadjustments       = "awsstepadjustments"
+	awscsvstr                = "awscsvstr"
+	aws6digitsstring         = "aws6digitsstring"
+	awsbyteslice             = "awsbyteslice"
+	awstagslice              = "awstagslice"
+	awsalarmrollbacktriggers = "awsalarmrollbacktriggers"
 )
 
 var (
@@ -176,6 +179,29 @@ func setFieldWithType(v, i interface{}, fieldPath string, destType string, inter
 			subnetMappings = append(subnetMappings, &elbv2.SubnetMapping{SubnetId: aws.String(splits[0]), AllocationId: aws.String(splits[1])})
 		}
 		v = subnetMappings
+	case awsclassicloadblisteners:
+		var listeners []*elb.Listener
+		for _, s := range castStringSlice(v) {
+			splits := strings.Split(s, ":")
+			if len(splits) != 4 {
+				return fmt.Errorf("missing value in listeners param '%s', expect format like HTTP:80:HTTP:80", splits)
+			}
+			loadbPort, err := strconv.ParseInt(splits[1], 10, 64)
+			if err != nil {
+				return fmt.Errorf("expecting numerical port value for loadbalancer port in '%s', (expect format like HTTP:80:HTTP:80)", splits)
+			}
+			instancePort, err := strconv.ParseInt(splits[3], 10, 64)
+			if err != nil {
+				return fmt.Errorf("expecting numerical port value for instance port in '%s', (expect format like HTTP:80:HTTP:80)", splits)
+			}
+			listeners = append(listeners, &elb.Listener{
+				Protocol:         aws.String(splits[0]),
+				LoadBalancerPort: aws.Int64(loadbPort),
+				InstanceProtocol: aws.String(splits[2]),
+				InstancePort:     aws.Int64(instancePort),
+			})
+		}
+		v = listeners
 	case awsportmappings:
 		sl := castStringSlice(v)
 		var portMappings []*ecs.PortMapping
@@ -251,12 +277,12 @@ func setFieldWithType(v, i interface{}, fieldPath string, destType string, inter
 			stepAdjustments = append(stepAdjustments, stepAdjustment)
 		}
 		v = stepAdjustments
-	case awsfiletobase64:
+	case awsuserdatatobase64:
 		var tplData interface{}
 		if len(interfs) > 0 {
 			tplData = interfs[0]
 		}
-		v, err = fileOrRemoteFileAsBase64(v, tplData)
+		v, err = userDataContentAsBase64(v, tplData)
 		if err != nil {
 			return err
 		}
@@ -287,7 +313,7 @@ func setFieldWithType(v, i interface{}, fieldPath string, destType string, inter
 		}
 		v = &ec2.AttributeBooleanValue{Value: &b}
 	case awsstringattribute:
-		str := fmt.Sprint(v)
+		str := castString(v)
 		v = &ec2.AttributeValue{Value: &str}
 	case awsstringpointermap:
 		matches := mapAttributeRegex.FindStringSubmatch(fieldPath)
@@ -347,7 +373,46 @@ func setFieldWithType(v, i interface{}, fieldPath string, destType string, inter
 		awsutil.SetValueAtPath(elemToSet.Interface(), matches[2], v)
 
 		return nil
+	case awstagslice:
+		var (
+			elbTags    []*elb.Tag
+			cfTags     []*cloudformation.Tag
+			appendFunc func(s1, s2 string)
+			assignFunc func()
+		)
+		switch i.(type) {
+		case *elb.CreateLoadBalancerInput:
+			appendFunc = func(s1, s2 string) {
+				elbTags = append(elbTags, &elb.Tag{Key: aws.String(s1), Value: aws.String(s2)})
+			}
+			assignFunc = func() { v = elbTags }
+		case *cloudformation.CreateStackInput, *cloudformation.UpdateStackInput:
+			appendFunc = func(s1, s2 string) {
+				cfTags = append(cfTags, &cloudformation.Tag{Key: aws.String(s1), Value: aws.String(s2)})
+			}
+			assignFunc = func() { v = cfTags }
+		}
+		for _, s := range castStringSlice(v) {
+			splits := strings.SplitN(s, ":", 2)
+			if len(splits) != 2 {
+				return fmt.Errorf("invalid tag '%s', expected 'key:value'", s)
+			}
+			appendFunc(splits[0], splits[1])
+		}
+		assignFunc()
+	case awsalarmrollbacktriggers:
+		var triggers []*cloudformation.RollbackTrigger
+		if list := castStringSlice(v); len(list) > 0 {
+			for _, t := range list {
+				triggers = append(triggers, &cloudformation.RollbackTrigger{
+					Arn:  aws.String(t),
+					Type: aws.String("AWS::CloudWatch::Alarm"),
+				})
+			}
+		}
+		v = triggers
 	}
+
 	awsutil.SetValueAtPath(i, fieldPath, v)
 	return nil
 }
@@ -509,37 +574,39 @@ func castStringPointerSlice(v interface{}) []*string {
 	}
 }
 
-func fileOrRemoteFileAsBase64(v interface{}, tplData interface{}) (string, error) {
-	path := castString(v)
+func userDataContentAsBase64(v interface{}, tplData interface{}) (string, error) {
+	userdata := castString(v)
 
 	var readErr error
 	var content []byte
 
-	if strings.HasPrefix(path, "http") {
+	if strings.HasPrefix(strings.TrimSpace(userdata), "#") { // userdata are bash content or yml cloud script content (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/user-data.html#user-data-shell-scripts)
+		r := strings.NewReplacer("\\a", "\a", "\\b", "\b", "\\f", "\f", "\\n", "\n", "\\t", "\t", "\\r", "\r", "\\v", "\v")
+		content = []byte(r.Replace(userdata))
+	} else if strings.HasPrefix(userdata, "http") {
 		client := &http.Client{Timeout: 5 * time.Second}
 
-		logger.ExtraVerbosef("fetching remote userdata at '%s'", path)
-		resp, err := client.Get(path)
+		logger.ExtraVerbosef("fetching remote userdata at '%s'", userdata)
+		resp, err := client.Get(userdata)
 		if err != nil {
 			return "", err
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode < http.StatusOK || resp.StatusCode > 299 {
-			return "", fmt.Errorf("'%s' when fetching userdata at '%s'", resp.Status, path)
+			return "", fmt.Errorf("'%s' when fetching userdata at '%s'", resp.Status, userdata)
 		}
 
 		content, readErr = ioutil.ReadAll(resp.Body)
 	} else {
-		content, readErr = ioutil.ReadFile(path)
+		content, readErr = ioutil.ReadFile(userdata)
 	}
 
 	if readErr != nil {
-		logger.Errorf("got userdata from '%s' but cannot read content: %s", path, readErr)
-		return "", readErr
+		return "", fmt.Errorf("got userdata from '%s' but cannot read content: %s", userdata, readErr)
 	}
 
-	if tpl, err := gotemplate.New(path).Parse(string(content)); err != nil {
+	if tpl, err := gotemplate.New("userdata").Parse(string(content)); err != nil {
 		logger.Warningf("cannot parse userdata as Go template: %s", err)
 	} else {
 		var buf bytes.Buffer
@@ -594,21 +661,6 @@ func structSetter(s interface{}, params map[string]interface{}) error {
 	return nil
 }
 
-func structListParamsKeys(src interface{}) map[string]bool {
-	val := reflect.ValueOf(src).Elem()
-	stru := val.Type()
-
-	result := make(map[string]bool)
-	for i := 0; i < stru.NumField(); i++ {
-		field := stru.Field(i)
-		if name, ok := field.Tag.Lookup("templateName"); ok {
-			_, req := field.Tag.Lookup("required")
-			result[name] = req
-		}
-	}
-	return result
-}
-
 func structInjector(src, dest interface{}, ctx map[string]interface{}) error {
 	val := reflect.ValueOf(src).Elem()
 	stru := val.Type()
@@ -633,46 +685,6 @@ func structInjector(src, dest interface{}, ctx map[string]interface{}) error {
 				}
 			}
 		}
-	}
-	return nil
-}
-
-func validateStruct(s interface{}, ignoredParams []string) error {
-	val := reflect.ValueOf(s)
-	stru := val.Elem().Type()
-
-	var messages []string
-	for i := 0; i < stru.NumField(); i++ {
-		field := stru.Field(i)
-		if _, ok := field.Tag.Lookup("required"); ok {
-			fieldName := field.Name
-			if tplName, ok := field.Tag.Lookup("templateName"); ok {
-				fieldName = tplName
-			}
-			if val.Elem().Field(i).IsNil() && !contains(ignoredParams, fieldName) {
-				messages = append(messages, fmt.Sprintf("missing required field '%s'", fieldName))
-			}
-		}
-
-		if tplName, ok := field.Tag.Lookup("templateName"); ok && !contains(ignoredParams, tplName) {
-			if val.Elem().Field(i).IsNil() {
-				continue
-			}
-			methName := fmt.Sprintf("Validate_%s", field.Name)
-			meth := val.MethodByName(methName)
-
-			if meth != (reflect.Value{}) {
-				results := meth.Call(nil)
-				if len(results) == 1 {
-					if iface := results[0].Interface(); iface != nil {
-						messages = append(messages, fmt.Sprintf("%s: %s", tplName, iface.(error).Error()))
-					}
-				}
-			}
-		}
-	}
-	if len(messages) > 0 {
-		return errors.New(strings.Join(messages, "; "))
 	}
 	return nil
 }

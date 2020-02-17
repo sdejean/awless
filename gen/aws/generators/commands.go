@@ -17,14 +17,11 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/ioutil"
 	"os"
-	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -59,31 +56,13 @@ func generateCommands() {
 	if err != nil {
 		panic(err)
 	}
-
-	var buff bytes.Buffer
-	err = templ.Execute(&buff, cmdsData)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = ioutil.WriteFile(filepath.Join(SPEC_DIR, "gen_runs.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, cmdsData, SPEC_DIR, "gen_runs.go")
 
 	templ, err = template.New("cmdInits").Parse(cmdInits)
 	if err != nil {
 		panic(err)
 	}
-
-	buff.Reset()
-	err = templ.Execute(&buff, cmdsData)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = ioutil.WriteFile(filepath.Join(SPEC_DIR, "gen_inits.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, cmdsData, SPEC_DIR, "gen_inits.go")
 
 	templ, err = template.New("templates_definitions").Funcs(
 		template.FuncMap{
@@ -93,20 +72,15 @@ func generateCommands() {
 	if err != nil {
 		panic(err)
 	}
-
-	buff.Reset()
-	if err = templ.Execute(&buff, cmdsData); err != nil {
-		panic(err)
-	}
-
-	if err = ioutil.WriteFile(filepath.Join(SPEC_DIR, "gen_cmds_defs.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, cmdsData, SPEC_DIR, "gen_cmds_defs.go")
 }
 
 type cmdData struct {
 	Action, Entity, API, Call, Input, Output string
 	Params                                   []templateParam
+	RequiredParamsKey                        []string
+	ExtrasParamsKey                          []string
+	HasRequiredParams                        bool
 	HasDryRun                                bool
 	GenDryRun                                bool
 }
@@ -145,6 +119,14 @@ func (v *findStructs) Visit(node ast.Node) (w ast.Visitor) {
 						return params[i].Name < params[j].Name
 					})
 					cmd.Params = params
+				}
+				for _, p := range cmd.Params {
+					if p.IsRequired {
+						cmd.HasRequiredParams = true
+						cmd.RequiredParamsKey = append(cmd.RequiredParamsKey, p.Name)
+					} else {
+						cmd.ExtrasParamsKey = append(cmd.ExtrasParamsKey, p.Name)
+					}
 				}
 				v.result[typ.Name.Name] = *cmd
 			}
@@ -245,7 +227,7 @@ limitations under the License.
 package awsspec
 
 {{ range $cmdName, $tag := . }}
-func New{{ $cmdName }}(sess *session.Session, l ...*logger.Logger) *{{ $cmdName }}{
+func New{{ $cmdName }}(sess *session.Session, g cloud.GraphAPI, l ...*logger.Logger) *{{ $cmdName }}{
 	cmd := new({{ $cmdName }})
 	if len(l) > 0 {
 		cmd.logger = l[0]
@@ -255,6 +237,7 @@ func New{{ $cmdName }}(sess *session.Session, l ...*logger.Logger) *{{ $cmdName 
 	if sess != nil {
 		cmd.api = {{ $tag.API }}.New(sess)
 	}
+	cmd.graph = g
 	return cmd
 }
 
@@ -262,33 +245,40 @@ func (cmd *{{ $cmdName }}) SetApi(api {{$tag.API}}iface.{{ ApiToInterface $tag.A
 	cmd.api = api
 }
 
-func (cmd *{{ $cmdName }}) Run(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *{{ $cmdName }}) Run(renv env.Running, params map[string]interface{}) (interface{}, error) {
+	if renv.IsDryRun() {
+		return cmd.dryRun(renv, params)
+	}
+	return cmd.run(renv, params)
+}
+
+func (cmd *{{ $cmdName }}) run(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	if err := cmd.inject(params); err != nil {
 		return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 	}
 	
 	if v, ok := implementsBeforeRun(cmd); ok {
-		if brErr := v.BeforeRun(ctx); brErr != nil {
+		if brErr := v.BeforeRun(renv); brErr != nil {
 			return nil, fmt.Errorf("before run: %s", brErr)
 		}
 	}
 	
 	{{ if $tag.Call }}
 	input := &{{ $tag.Input }}{}
-	if err := structInjector(cmd, input, ctx) ; err != nil {
+	if err := structInjector(cmd, input, renv.Context()) ; err != nil {
 		return nil, fmt.Errorf("cannot inject in {{ $tag.Input }}: %s", err)
 	}
 	start := time.Now()
 	output, err := cmd.api.{{ $tag.Call }}(input)
-	cmd.logger.ExtraVerbosef("{{ $tag.API }}.{{ $tag.Call }} call took %s", time.Since(start))
+	renv.Log().ExtraVerbosef("{{ $tag.API }}.{{ $tag.Call }} call took %s", time.Since(start))
 	if err != nil {
-		return nil, err
+		return nil, decorateAWSError(err)
 	}
 	{{- else }}
 	
-	output, err := cmd.ManualRun(ctx)
+	output, err := cmd.ManualRun(renv)
 	if err != nil {
-		return nil, err
+		return nil, decorateAWSError(err)
 	}
 	{{- end }}
 	
@@ -297,18 +287,18 @@ func (cmd *{{ $cmdName }}) Run(ctx, params map[string]interface{}) (interface{},
 		if output != nil {
 			extracted = v.ExtractResult(output)
 		} else {
-			cmd.logger.Warning("{{ $tag.Action }} {{ $tag.Entity }}: AWS command returned nil output")
+			renv.Log().Warning("{{ $tag.Action }} {{ $tag.Entity }}: AWS command returned nil output")
 		}
 	}
 	
 	if extracted != nil {
-		cmd.logger.Verbosef("{{ $tag.Action }} {{ $tag.Entity }} '%s' done", extracted)
+		renv.Log().Verbosef("{{ $tag.Action }} {{ $tag.Entity }} '%s' done", extracted)
 	} else {
-		cmd.logger.Verbose("{{ $tag.Action }} {{ $tag.Entity }} done")
+		renv.Log().Verbose("{{ $tag.Action }} {{ $tag.Entity }} done")
 	}
 
 	if v, ok := implementsAfterRun(cmd); ok {
-		if brErr := v.AfterRun(ctx, output); brErr != nil {
+		if brErr := v.AfterRun(renv, output); brErr != nil {
 			return nil, fmt.Errorf("after run: %s", brErr)
 		}
 	}
@@ -316,28 +306,17 @@ func (cmd *{{ $cmdName }}) Run(ctx, params map[string]interface{}) (interface{},
 	return extracted, nil
 }
 
-func (cmd *{{ $cmdName }}) ValidateCommand(params map[string]interface{}, refs []string) (errs []error) {
-	if err := cmd.inject(params); err != nil {
-		return []error{err}
-	}
-	if err := validateStruct(cmd, refs); err != nil {
-		errs = append(errs, err)
-	}
-
-	return
-}
-
 {{ if $tag.HasDryRun }}
 	{{ if $tag.GenDryRun }}
-	func (cmd *{{ $cmdName }}) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+	func (cmd *{{ $cmdName }}) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 		if err := cmd.inject(params); err != nil {
-			return nil, fmt.Errorf("dry run: cannot set params on command struct: %s", err)
+			return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 		}
 
 		input := &{{ $tag.Input }}{}
 		input.SetDryRun(true)
-		if err := structInjector(cmd, input, ctx) ; err != nil {
-			return nil, fmt.Errorf("dry run: cannot inject in {{ $tag.Input }}: %s", err)
+		if err := structInjector(cmd, input, renv.Context()) ; err != nil {
+			return nil, fmt.Errorf("cannot inject in {{ $tag.Input }}: %s", err)
 		}
 
 		start := time.Now()
@@ -345,24 +324,20 @@ func (cmd *{{ $cmdName }}) ValidateCommand(params map[string]interface{}, refs [
 		if awsErr, ok := err.(awserr.Error); ok {
 			switch code := awsErr.Code(); {
 			case code == dryRunOperation, strings.HasSuffix(code, notFound), strings.Contains(awsErr.Message(), "Invalid IAM Instance Profile name"):
-				cmd.logger.ExtraVerbosef("dry run: {{ $tag.API }}.{{ $tag.Call }} call took %s", time.Since(start))
-				cmd.logger.Verbose("dry run: {{ $tag.Action }} {{ $tag.Entity }} ok")
+				renv.Log().ExtraVerbosef("dry run: {{ $tag.API }}.{{ $tag.Call }} call took %s", time.Since(start))
+				renv.Log().Verbose("dry run: {{ $tag.Action }} {{ $tag.Entity }} ok")
 				return fakeDryRunId("{{ $tag.Entity }}"), nil
 			}
 		}
 
-		return nil, fmt.Errorf("dry run: %s", err) 
+		return nil, err
 	}
 	{{- end }}
 {{- else }}
-func (cmd *{{ $cmdName }}) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *{{ $cmdName }}) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	return fakeDryRunId("{{ $tag.Entity }}"), nil
 }
 {{- end }}
-
-func (cmd *{{ $cmdName }}) ParamsHelp() string {
-	return generateParamsHelp("{{ $tag.Action }}{{ $tag.Entity }}", structListParamsKeys(cmd))
-}
 
 func (cmd *{{ $cmdName }}) inject(params map[string]interface{}) error {
 	return structSetter(cmd, params)
@@ -409,13 +384,14 @@ var MockAWSSessionFactory = &AWSFactory{
 type AWSFactory struct {
 	Log   *logger.Logger
 	Sess *session.Session
+	Graph cloud.GraphAPI
 }
 
 func (f *AWSFactory) Build(key string) func() interface{} {
 	switch key {
 	{{- range $cmdName, $tag := . }}
 	case "{{ $tag.Action }}{{ $tag.Entity }}":
-		return func() interface{} { return New{{ $cmdName }}(f.Sess, f.Log) }
+		return func() interface{} { return New{{ $cmdName }}(f.Sess, f.Graph, f.Log) }
 	{{- end}}
 	}
 	return nil
@@ -459,13 +435,12 @@ var APIPerTemplateDefName = map[string]string {
 }
 
 var AWSTemplatesDefinitions = map[string]Definition{
-{{- range $, $cmd := . }}
+{{- range $cmdName, $cmd := . }}
 	"{{ $cmd.Action }}{{ $cmd.Entity }}": Definition{
 			Action: "{{ $cmd.Action }}",
 			Entity: "{{ $cmd.Entity }}",
 			Api: "{{ $cmd.API }}",
-			RequiredParams: []string{ {{- range $param := $cmd.Params }}{{ if $param.IsRequired }}"{{ $param.Name }}", {{- end}}{{- end}} },
-			ExtraParams: []string{ {{- range $param := $cmd.Params }}{{ if not $param.IsRequired }}"{{ $param.Name }}", {{- end}}{{- end}} },
+			Params: new({{ $cmdName }}).ParamsSpec().Rule(),
 		},
 {{- end }}
 }

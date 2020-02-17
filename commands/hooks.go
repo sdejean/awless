@@ -19,9 +19,11 @@ package commands
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
-	"github.com/fatih/color"
+	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/spf13/cobra"
 	"github.com/wallix/awless/aws/services"
 	"github.com/wallix/awless/cloud"
@@ -45,30 +47,68 @@ func initAwlessEnvHook(cmd *cobra.Command, args []string) error {
 	if err := config.InitAwlessEnv(); err != nil {
 		return fmt.Errorf("cannot init awless environment: %s", err)
 	}
-	if awsRegionGlobalFlag != "" {
-		if err := config.SetVolatile(config.RegionConfigKey, awsRegionGlobalFlag); err != nil {
-			return err
-		}
-	} else if envRegion := os.Getenv("AWS_DEFAULT_REGION"); envRegion != "" {
-		if err := config.SetVolatile(config.RegionConfigKey, envRegion); err != nil {
-			return err
-		}
-	}
+
+	return applyRegionAndProfilePrecedence()
+}
+
+var profileOverridenThrough, regionOverridenThrough string
+
+func applyRegionAndProfilePrecedence() error {
 	if awsProfileGlobalFlag != "" {
 		if err := config.SetVolatile(config.ProfileConfigKey, awsProfileGlobalFlag); err != nil {
 			return err
 		}
+		profileOverridenThrough = "command flag"
 	} else if envProfile := os.Getenv("AWS_DEFAULT_PROFILE"); envProfile != "" {
 		if err := config.SetVolatile(config.ProfileConfigKey, envProfile); err != nil {
 			return err
 		}
+		profileOverridenThrough = "AWS_DEFAULT_PROFILE variable"
+	} else if envProfile := os.Getenv("AWS_PROFILE"); envProfile != "" {
+		if err := config.SetVolatile(config.ProfileConfigKey, envProfile); err != nil {
+			return err
+		}
+		profileOverridenThrough = "AWS_PROFILE variable"
 	}
 
-	switch awsColorGlobalFlag {
-	case "never":
-		color.NoColor = true
-	case "always":
-		color.NoColor = false
+	profile := config.GetAWSProfile()
+
+	if region, embedded, err := hasEmbeddedRegionInSharedConfigForProfile(profile); err == nil {
+		if embedded {
+			if e := config.SetVolatile(config.RegionConfigKey, region); e != nil {
+				return e
+			}
+			regionOverridenThrough = fmt.Sprintf("profile '%s' (see AWS config files $HOME/.aws/{credentials,config})", profile)
+		} else {
+			regionOverridenThrough = ""
+		}
+	} else {
+		return err
+	}
+
+	if awsRegionGlobalFlag != "" {
+		if err := config.SetVolatile(config.RegionConfigKey, awsRegionGlobalFlag); err != nil {
+			return err
+		}
+		regionOverridenThrough = "command flag"
+	} else if envRegion := os.Getenv("AWS_DEFAULT_REGION"); envRegion != "" {
+		if err := config.SetVolatile(config.RegionConfigKey, envRegion); err != nil {
+			return err
+		}
+		regionOverridenThrough = "AWS_DEFAULT_REGION variable"
+	}
+
+	return nil
+}
+
+func notifyOnRegionOrProfilePrecedenceHook(*cobra.Command, []string) error {
+	applyRegionAndProfilePrecedence()
+
+	if m := profileOverridenThrough; len(m) > 0 {
+		logger.Infof("profile precedence: '%s' loaded through %s", config.GetAWSProfile(), m)
+	}
+	if m := regionOverridenThrough; len(m) > 0 {
+		logger.Infof("region precedence: '%s' loaded through %s", config.GetAWSRegion(), m)
 	}
 
 	return nil
@@ -78,10 +118,12 @@ func initCloudServicesHook(cmd *cobra.Command, args []string) error {
 	if localGlobalFlag {
 		return nil
 	}
-	awsConf := config.GetConfigWithPrefix("aws.")
-	logger.Verbosef("awless %s - loading AWS session with profile '%v' and region '%v'", config.Version, awsConf[config.ProfileConfigKey], awsConf[config.RegionConfigKey])
 
-	if err := awsservices.Init(awsConf, logger.DefaultLogger, config.SetProfileCallback, networkMonitorFlag); err != nil {
+	profile, region := config.GetAWSProfile(), config.GetAWSRegion()
+
+	logger.Verbosef("awless %s - loading AWS session with profile '%s' and region '%s'", config.Version, profile, region)
+
+	if err := awsservices.Init(profile, region, config.GetConfigWithPrefix("aws."), logger.DefaultLogger, config.SetProfileCallback, networkMonitorFlag); err != nil {
 		return err
 	}
 
@@ -91,7 +133,7 @@ func initCloudServicesHook(cmd *cobra.Command, args []string) error {
 			services = append(services, s)
 		}
 		if !noSyncGlobalFlag {
-			logger.Infof("Syncing new region '%s'... (disable with --no-sync global flag)", awsConf[config.RegionConfigKey])
+			logger.Infof("Syncing new region '%s'... (disable with --no-sync global flag)", region)
 			sync.NewSyncer(logger.DefaultLogger).Sync(services...)
 		}
 	}
@@ -148,9 +190,9 @@ func onVersionUpgrade(cmd *cobra.Command, args []string) error {
 		}); err != nil {
 			fmt.Printf("cannot store upgraded version in db: %s\n", err)
 		}
-		logger.Infof("You have just upgraded awless from %s to %s", lastVersion, config.Version)
 		migrationActionsAndExtraMessages(config.Version)
-		logger.Infof("Check out %s features at https://github.com/wallix/awless/releases", config.Version)
+		logger.Infof("You have just upgraded awless from %s to %s", lastVersion, config.Version)
+		logger.Infof("Check out %s latest features at https://github.com/wallix/awless/blob/master/CHANGELOG.md", config.Version)
 	}
 
 	return nil
@@ -196,7 +238,27 @@ func migrationActionsAndExtraMessages(current string) {
 		}
 		config.Unset("instance.image")
 		logger.Info("\tYou can always check your config values with 'awless config'")
+	case "v0.1.9":
+		logger.Info("In v0.1.9, the local data file model has been moved to support multi-account transparently")
+		oldData := filepath.Join(os.Getenv("__AWLESS_HOME"), "aws", "rdf")
+		if err := os.RemoveAll(oldData); err == nil {
+			logger.Info("-> Stale data have been removed. The local model (ex: used for completion) will progressively be synced again through your usage of awless.")
+			logger.Info("-> You can also manually run `awless sync`")
+		}
 	}
+}
+
+func hasEmbeddedRegionInSharedConfigForProfile(profile string) (string, bool, error) {
+	s, err := session.NewSessionWithOptions(session.Options{
+		AssumeRoleTokenProvider: stscreds.StdinTokenProvider,
+		SharedConfigState:       session.SharedConfigEnable,
+		Profile:                 profile,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("cannot check profile '%s' has embedded region in shared config file: %s", profile, err)
+	}
+	region := *s.Config.Region
+	return region, len(region) > 0, nil
 }
 
 func isNotAwlessFormerDefaultAMI(s string) bool {

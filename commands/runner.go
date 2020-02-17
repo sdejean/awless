@@ -7,13 +7,20 @@ import (
 
 	"github.com/wallix/awless/aws/services"
 	"github.com/wallix/awless/aws/spec"
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/config"
 	"github.com/wallix/awless/database"
-	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/logger"
 	"github.com/wallix/awless/sync"
 	"github.com/wallix/awless/template"
+	"github.com/wallix/awless/template/env"
 )
+
+func NewRunnerRequiredParamsOnly(tpl *template.Template, msg, tplPath string, fillers ...map[string]interface{}) *template.Runner {
+	r := NewRunner(tpl, msg, tplPath, fillers...)
+	r.ParamsSuggested = env.REQUIRED_PARAMS_ONLY
+	return r
+}
 
 func NewRunner(tpl *template.Template, msg, tplPath string, fillers ...map[string]interface{}) *template.Runner {
 	runner := &template.Runner{}
@@ -27,10 +34,16 @@ func NewRunner(tpl *template.Template, msg, tplPath string, fillers ...map[strin
 	runner.Fillers = fillers
 	runner.AliasFunc = resolveAliasFunc
 	runner.MissingHolesFunc = missingHolesStdinFunc()
+	if allSuggestedParamsFlag {
+		runner.ParamsSuggested = env.ALL_PARAMS
+	}
+	if noSuggestedParamsFlag {
+		runner.ParamsSuggested = env.REQUIRED_PARAMS_ONLY
+	}
 
 	runner.Validators = []template.Validator{
-		&template.UniqueNameValidator{LookupGraph: func(key string) (*graph.Graph, bool) {
-			g := sync.LoadLocalGraphForService(awsservices.ServicePerResourceType[key], config.GetAWSRegion())
+		&template.UniqueNameValidator{LookupGraph: func(key string) (cloud.GraphAPI, bool) {
+			g := sync.LoadLocalGraphForService(awsservices.ServicePerResourceType[key], config.GetAWSProfile(), config.GetAWSRegion())
 			return g, true
 		}},
 		&template.ParamIsSetValidator{Action: "create", Entity: "instance", Param: "keypair", WarningMessage: "This instance has no access keypair. You might not be able to connect to it. Use `awless create instance keypair=my-keypair ...`"},
@@ -51,9 +64,9 @@ func NewRunner(tpl *template.Template, msg, tplPath string, fillers ...map[strin
 		} else {
 			fmt.Printf("%s\n\n", renderGreenFn(tplExec.Template))
 			if isSchedulingMode() {
-				fmt.Print("Confirm scheduling? [y/N] ")
+				fmt.Printf("Confirm scheduling (region: %s)? [y/N] ", config.GetAWSRegion())
 			} else {
-				fmt.Print("Confirm? [y/N] ")
+				fmt.Printf("Confirm (region: %s)? [y/N] ", config.GetAWSRegion())
 			}
 			if _, err := fmt.Scanln(&yesorno); err != nil && err.Error() != "unexpected newline" {
 				return false, err

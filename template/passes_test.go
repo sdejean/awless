@@ -2,49 +2,21 @@ package template
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/wallix/awless/aws/spec"
+	"github.com/wallix/awless/template/env"
 	"github.com/wallix/awless/template/internal/ast"
+	"github.com/wallix/awless/template/params"
 )
-
-type mockCommand struct{ id string }
-
-func (c *mockCommand) ValidateCommand(map[string]interface{}, []string) []error {
-	return []error{errors.New(c.id)}
-}
-func (c *mockCommand) Run(ctx, params map[string]interface{}) (interface{}, error)    { return nil, nil }
-func (c *mockCommand) DryRun(ctx, params map[string]interface{}) (interface{}, error) { return nil, nil }
-func (c *mockCommand) ValidateParams(p []string) ([]string, error) {
-	switch c.id {
-	case "1", "2":
-		return []string{c.id}, nil
-	case "3":
-		return []string{c.id}, errors.New("unexpected")
-	}
-	panic("wooot")
-}
-
-func (c *mockCommand) ConvertParams() ([]string, func(values map[string]interface{}) (map[string]interface{}, error)) {
-	return []string{"param1", "param2"},
-		func(values map[string]interface{}) (map[string]interface{}, error) {
-			_, hasParam1 := values["param1"]
-			_, hasParam2 := values["param2"]
-			if hasParam1 && hasParam2 {
-				return map[string]interface{}{"new": fmt.Sprint(values["param1"], values["param2"])}, nil
-			}
-			return values, nil
-		}
-}
 
 func TestCommandsPasses(t *testing.T) {
 	cmd1, cmd2, cmd3 := &mockCommand{"1"}, &mockCommand{"2"}, &mockCommand{"3"}
 	var count int
-	env := NewEnv()
-	env.Lookuper = func(...string) interface{} {
+	env := NewEnv().WithLookupCommandFunc(func(...string) interface{} {
 		count++
 		switch count {
 		case 1:
@@ -56,119 +28,32 @@ func TestCommandsPasses(t *testing.T) {
 		default:
 			panic("whaat")
 		}
-	}
+	}).Build()
 
 	t.Run("verify commands exist", func(t *testing.T) {
 		tpl := MustParse("create instance\nsub = create subnet\ncreate instance")
 		count = 0
-		_, _, err := verifyCommandsDefinedPass(tpl, env)
+		_, _, err := injectCommandsInNodesPass(tpl, env)
 		if err != nil {
 			t.Fatal(err)
-		}
-	})
-
-	t.Run("convert params", func(t *testing.T) {
-		tpl := MustParse("create instance\nsub = create subnet param1=anything param2=other\ncreate instance param1=anything")
-		count = 0
-		compiled, _, err := convertParamsPass(tpl, env)
-		if err != nil {
-			t.Fatal(err)
-		}
-		exp := map[string]interface{}{"new": "anythingother"}
-		if got, want := compiled.CommandNodesIterator()[1].ToDriverParams(), exp; !reflect.DeepEqual(got, want) {
-			t.Fatalf("got %#v, want %#v", got, want)
-		}
-		exp = map[string]interface{}{"param1": "anything"}
-		if got, want := compiled.CommandNodesIterator()[2].ToDriverParams(), exp; !reflect.DeepEqual(got, want) {
-			t.Fatalf("got %#v, want %#v", got, want)
-		}
-	})
-
-	t.Run("validate commands params", func(t *testing.T) {
-		tpl := MustParse("create instance\nsub = create subnet\ncreate instance")
-		count = 0
-		_, _, err := validateCommandsParamsPass(tpl, env)
-		if err == nil {
-			t.Fatal("expected err got none")
-		}
-		if got, want := err.Error(), "unexpected"; !strings.Contains(got, want) {
-			t.Fatalf("%s should contain %s", got, want)
-		}
-	})
-
-	t.Run("normalize missing required params as hole", func(t *testing.T) {
-		tpl := MustParse("create instance\nsub = create subnet")
-		count = 0
-		compiled, _, err := normalizeMissingRequiredParamsAsHolePass(tpl, env)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		for i, cmd := range compiled.CommandNodesIterator() {
-			if got, want := len(cmd.GetHoles()), 1; got != want {
-				t.Fatalf("%d. got %d, want %d", i+1, got, want)
-			}
-			var first string
-			for h := range cmd.GetHoles() {
-				first = h
-			}
-			if got, want := first, fmt.Sprintf("%s.%d", cmd.Entity, i+1); got != want {
-				t.Fatalf("%d. got %s, want %s", i+1, got, want)
-			}
-		}
-	})
-
-	t.Run("validate commands", func(t *testing.T) {
-		tpl := MustParse("create instance\nsub = create subnet\ncreate instance")
-		count = 0
-		_, _, err := validateCommandsPass(tpl, env)
-		if err == nil {
-			t.Fatal("expected err got none")
-		}
-
-		checkContainsAll(t, err.Error(), "123")
-	})
-
-	t.Run("inject command", func(t *testing.T) {
-		count = 0
-		tpl := MustParse("create instance\nsub = create subnet\ncreate instance")
-
-		compiled, _, err := injectCommandsPass(tpl, env)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		cmds := compiled.CommandNodesIterator()
-
-		sameObject := func(got, want interface{}) bool {
-			return reflect.ValueOf(got).Pointer() == reflect.ValueOf(want).Pointer()
-		}
-		if got, want := cmds[0].Command, cmd1; !sameObject(got, want) {
-			t.Fatalf("different object: got %#v, want %#v", got, want)
-		}
-		if got, want := cmds[1].Command, cmd2; !sameObject(got, want) {
-			t.Fatalf("different object: got %#v, want %#v", got, want)
-		}
-		if got, want := cmds[2].Command, cmd3; !sameObject(got, want) {
-			t.Fatalf("different object: got %#v, want %#v", got, want)
 		}
 	})
 }
 
 func TestBailOnUnresolvedAliasOrHoles(t *testing.T) {
-	env := NewEnv()
+	env := NewEnv().Build()
 	tcases := []struct {
 		tpl         string
 		expAliasErr string
 		expHolesErr string
 	}{
 		{tpl: "create subnet\ncreate instance subnet=@mysubnet name={instance.name}\ncreate instance", expAliasErr: "unresolved alias", expHolesErr: "unresolved holes"},
-		{tpl: "create subnet\ncreate instance subnet=@mysubnet\ncreate instance", expAliasErr: "unresolved alias: [mysubnet]"},
-		{tpl: "create subnet hole=@myhole\ncreate instance subnet=@mysubnet\ncreate instance", expAliasErr: "unresolved alias: [myhole mysubnet]"},
-		{tpl: "create subnet name=subnet\nname=@myinstance\ncreate instance name=$myinstance\ncreate instance", expAliasErr: "unresolved alias: [myinstance]"},
-		{tpl: "create subnet\ncreate instance name={instance.name}\ncreate instance", expHolesErr: "unresolved holes: [instance.name]"},
-		{tpl: "create subnet\ncreate instance name={instance.name}\ncreate instance\ncreate subnet name={subnet.name}", expHolesErr: "unresolved holes: [instance.name subnet.name]"},
-		{tpl: "subnetname = {subnet.name} create subnet name=$subnetname\ncreate instance name=instancename\ncreate instance", expHolesErr: "unresolved holes: [subnet.name]"},
+		{tpl: "create subnet\ncreate instance subnet=@mysubnet\ncreate instance", expAliasErr: "unresolved alias: [@mysubnet]"},
+		{tpl: "create subnet hole=@myhole\ncreate instance subnet=@mysubnet\ncreate instance", expAliasErr: "unresolved alias: [@myhole @mysubnet]"},
+		{tpl: "create subnet name=subnet\nname=@myinstance\ncreate instance name=$myinstance\ncreate instance", expAliasErr: "unresolved alias: [@myinstance]"},
+		{tpl: "create subnet\ncreate instance name={instance.name}\ncreate instance", expHolesErr: "unresolved holes: [{instance.name}]"},
+		{tpl: "create subnet\ncreate instance name={instance.name}\ncreate instance\ncreate subnet name={subnet.name}", expHolesErr: "unresolved holes: [{instance.name} {subnet.name}]"},
+		{tpl: "subnetname = {subnet.name} create subnet name=$subnetname\ncreate instance name=instancename\ncreate instance", expHolesErr: "unresolved holes: [{subnet.name}]"},
 		{tpl: "create subnet\ncreate instance name=instancename\ncreate instance\ncreate subnet subnet=name"},
 	}
 
@@ -195,7 +80,7 @@ func TestBailOnUnresolvedAliasOrHoles(t *testing.T) {
 }
 
 func TestCheckInvalidReferencesDeclarationPass(t *testing.T) {
-	env := NewEnv()
+	env := NewEnv().Build()
 	tcases := []struct {
 		tpl    string
 		expErr string
@@ -222,21 +107,64 @@ func TestCheckInvalidReferencesDeclarationPass(t *testing.T) {
 	}
 }
 
+func TestResolveParamsAndExtractRefsPass(t *testing.T) {
+	env := NewEnv().Build()
+	tcases := []struct {
+		tpl                string
+		expStatementParams []map[string]interface{}
+		expStatementRefs   []map[string]interface{}
+	}{
+		{
+			tpl: "sub = create subnet name=my-sub cidr=10.0.0.0/16\ncreate instance subnet=$sub count=10 type=t2.nano",
+			expStatementParams: []map[string]interface{}{
+				{"name": "my-sub", "cidr": "10.0.0.0/16"},
+				{"count": 10, "type": "t2.nano"},
+			},
+			expStatementRefs: []map[string]interface{}{
+				{},
+				{"subnet": ast.NewRefNode("sub")},
+			},
+		},
+		{
+			tpl: "sub = create subnet list=[id-1234,24,id-2345]\ncreate instance list-with-ref=[id-3456,42.0,$sub]",
+			expStatementParams: []map[string]interface{}{
+				{"list": []interface{}{"id-1234", 24, "id-2345"}},
+				{},
+			},
+			expStatementRefs: []map[string]interface{}{
+				{},
+				{"list-with-ref": ast.NewListNode([]interface{}{"id-3456", 42.0, ast.NewRefNode("sub")})},
+			},
+		},
+		//list
+	}
+
+	for i, tcase := range tcases {
+		tpl, _, err := resolveParamsAndExtractRefsPass(MustParse(tcase.tpl), env)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for cmdIndex, cmd := range tpl.CommandNodesIterator() {
+			if got, want := cmd.ParamNodes, tcase.expStatementParams[cmdIndex]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("%d: got %#v, want %#v", i+1, got, want)
+			}
+			if got, want := cmd.Refs, tcase.expStatementRefs[cmdIndex]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("%d: got %#v, want %#v", i+1, got, want)
+			}
+		}
+	}
+}
+
 type mockCommandWithResult struct{ id string }
 
-func (c *mockCommandWithResult) ValidateCommand(map[string]interface{}, []string) []error { return nil }
-func (c *mockCommandWithResult) Run(ctx, params map[string]interface{}) (interface{}, error) {
+func (c *mockCommandWithResult) ParamsSpec() params.Spec { return nil }
+func (c *mockCommandWithResult) Run(env.Running, map[string]interface{}) (interface{}, error) {
 	return nil, nil
 }
-func (c *mockCommandWithResult) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
-	return nil, nil
-}
-func (c *mockCommandWithResult) ValidateParams(p []string) ([]string, error) { return nil, nil }
-func (c *mockCommandWithResult) ExtractResult(i interface{}) string          { return "" }
+func (c *mockCommandWithResult) ExtractResult(i interface{}) string { return "" }
 
 func TestFailOnDeclarationWithNoResultPass(t *testing.T) {
-	env := NewEnv()
-	env.Lookuper = func(tokens ...string) interface{} {
+	env := NewEnv().WithLookupCommandFunc(func(tokens ...string) interface{} {
 		switch strings.Join(tokens, "") {
 		case "createinstance":
 			return &mockCommandWithResult{"create instance"}
@@ -247,7 +175,7 @@ func TestFailOnDeclarationWithNoResultPass(t *testing.T) {
 		default:
 			panic("whaat")
 		}
-	}
+	}).Build()
 	tcases := []struct {
 		tpl    string
 		expErr string
@@ -257,7 +185,8 @@ func TestFailOnDeclarationWithNoResultPass(t *testing.T) {
 	}
 
 	for i, tcase := range tcases {
-		_, _, err := failOnDeclarationWithNoResultPass(MustParse(tcase.tpl), env)
+		pass := newMultiPass(injectCommandsInNodesPass, failOnDeclarationWithNoResultPass)
+		_, _, err := pass.compile(MustParse(tcase.tpl), env)
 		if tcase.expErr == "" && err != nil {
 			t.Fatalf("%d: %v", i+1, err)
 		}
@@ -275,8 +204,7 @@ func TestResolveMissingHolesPass(t *testing.T) {
 	create instance name={redis.prod} id={redis.prod} count=3`)
 
 	var count int
-	env := NewEnv()
-	env.MissingHolesFunc = func(in string, paramPaths []string) interface{} {
+	cenv := NewEnv().WithMissingHolesFunc(func(in string, paramPaths []string, optional bool) string {
 		count++
 		switch in {
 		case "instance.subnet":
@@ -303,12 +231,13 @@ func TestResolveMissingHolesPass(t *testing.T) {
 		default:
 			return ""
 		}
-	}
-	env.AddFillers(map[string]interface{}{"instance.type": "t2.micro"})
+	}).Build()
+
+	cenv.Push(env.FILLERS, map[string]interface{}{"instance.type": "t2.micro"})
 
 	pass := newMultiPass(resolveHolesPass, resolveMissingHolesPass)
 
-	tpl, _, err := pass.compile(tpl, env)
+	tpl, _, err := pass.compile(tpl, cenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,7 +246,7 @@ func TestResolveMissingHolesPass(t *testing.T) {
 		t.Fatalf("got %d, want %d", got, want)
 	}
 
-	assertVariableValues(t, tpl,
+	assertRightExpressionValue(t, tpl,
 		"1.2.3.4",
 	)
 	assertCmdParams(t, tpl,
@@ -327,22 +256,94 @@ func TestResolveMissingHolesPass(t *testing.T) {
 	)
 }
 
+func TestResolveMissingSuggestedPass(t *testing.T) {
+	var count int
+	tpl := `create instance count=1 subnet=sub-1234 image=ami-1a17137a type=t2.nano name=my-instance securitygroup=@my-sec-group`
+	buildingEnv := NewEnv().WithMissingHolesFunc(func(in string, paramPaths []string, optional bool) string {
+		count++
+		if !optional {
+			t.Fatalf("unexepected required parameter %s: %v", in, paramPaths)
+			return ""
+		}
+		switch paramPaths[0] {
+		case "create.instance.ip":
+			return "1.2.3.4"
+		case "create.instance.keypair":
+			return "mykeypair"
+		case "create.instance.lock":
+			return "true"
+		case "create.instance.role":
+			return "arole"
+		case "create.instance.userdata":
+			return "/path/to/my/file"
+		default:
+			t.Fatalf("unexepected optional parameter %s: %v", in, paramPaths)
+			return ""
+		}
+	}).WithLookupCommandFunc(func(tokens ...string) interface{} {
+		return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+	})
+	cenv := buildingEnv.Build()
+
+	pass := newMultiPass(injectCommandsInNodesPass, processAndValidateParamsPass, resolveMissingHolesPass)
+
+	compiled, _, err := pass.compile(MustParse(tpl), cenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := count, 1; got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := compiled.String(), "create instance count=1 image=ami-1a17137a keypair=mykeypair name=my-instance securitygroup=@my-sec-group subnet=sub-1234 type=t2.nano"; got != want {
+		t.Fatalf("got \n%s, want \n%s", got, want)
+	}
+
+	count = 0
+	cenv = buildingEnv.WithParamsMode(env.REQUIRED_PARAMS_ONLY).Build()
+	compiled, _, err = pass.compile(MustParse(tpl), cenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := count, 0; got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := compiled.String(), "create instance count=1 image=ami-1a17137a name=my-instance securitygroup=@my-sec-group subnet=sub-1234 type=t2.nano"; got != want {
+		t.Fatalf("got \n%s, want \n%s", got, want)
+	}
+
+	count = 0
+	cenv = buildingEnv.WithParamsMode(env.ALL_PARAMS).Build()
+	compiled, _, err = pass.compile(MustParse(tpl), cenv)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := count, 5; got != want {
+		t.Fatalf("got %d, want %d", got, want)
+	}
+	if got, want := compiled.String(), "create instance count=1 image=ami-1a17137a ip=1.2.3.4 keypair=mykeypair lock=true name=my-instance role=arole securitygroup=@my-sec-group subnet=sub-1234 type=t2.nano userdata=/path/to/my/file"; got != want {
+		t.Fatalf("got \n%s, want \n%s", got, want)
+	}
+}
+
 func TestResolveAliasPass(t *testing.T) {
 	tpl := MustParse("create instance subnet=@my-subnet ami={instance.ami} count=3")
 
-	env := NewEnv()
-	env.AliasFunc = func(e, k, v string) string {
+	cenv := NewEnv().WithAliasFunc(func(p, v string) string {
 		vals := map[string]string{
 			"my-ami":    "ami-12345",
 			"my-subnet": "sub-12345",
 		}
 		return vals[v]
-	}
-	env.AddFillers(map[string]interface{}{"instance.ami": ast.NewAliasValue("my-ami")})
+	}).Build()
+
+	cenv.Push(env.FILLERS, map[string]interface{}{"instance.ami": ast.NewAliasNode("my-ami")})
 
 	pass := newMultiPass(resolveHolesPass, resolveAliasPass)
 
-	tpl, _, err := pass.compile(tpl, env)
+	tpl, _, err := pass.compile(tpl, cenv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -353,23 +354,25 @@ func TestResolveAliasPass(t *testing.T) {
 func TestResolveHolesPass(t *testing.T) {
 	tpl := MustParse("create instance count={instance.count} type={instance.type}")
 
-	env := NewEnv()
-	env.AddFillers(map[string]interface{}{
+	cenv := NewEnv().Build()
+	cenv.Push(env.FILLERS, map[string]interface{}{
 		"instance.count": 3,
 		"instance.type":  "t2.micro",
 	})
 
-	tpl, _, err := resolveHolesPass(tpl, env)
+	tpl, _, err := resolveHolesPass(tpl, cenv)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	assertCmdHoles(t, tpl, map[string][]string{})
+	if holes := ast.CollectHoles(tpl.AST); len(holes) > 0 {
+		t.Fatalf("expected no holes got: %v", holes)
+	}
 	assertCmdParams(t, tpl, map[string]interface{}{"type": "t2.micro", "count": 3})
 }
 
 func TestInlineVariableWithValue(t *testing.T) {
-	env := NewEnv()
+	env := NewEnv().Build()
 	tcases := []struct {
 		tpl      string
 		expError string
@@ -400,7 +403,7 @@ func TestInlineVariableWithValue(t *testing.T) {
 
 func TestDefaultEnvWithNilFunc(t *testing.T) {
 	text := "create instance name={instance.name} subnet=@mysubnet"
-	env := NewEnv()
+	env := NewEnv().Build()
 	tpl := MustParse(text)
 
 	pass := newMultiPass(resolveHolesPass, resolveMissingHolesPass, resolveAliasPass)
@@ -435,78 +438,28 @@ func TestCmdErr(t *testing.T) {
 	}
 }
 
-type params map[string]interface{}
-type holesKeys map[string][]string
-type refs map[string][]string
-type aliases map[string][]string
+type mockCommand struct{ id string }
 
-func assertVariableValues(t *testing.T, tpl *Template, exp ...interface{}) {
+func (c *mockCommand) Run(env.Running, map[string]interface{}) (interface{}, error) { return nil, nil }
+func (c *mockCommand) ParamsSpec() params.Spec                                      { return params.NewSpec(nil) }
+
+func assertRightExpressionValue(t *testing.T, tpl *Template, exp ...interface{}) {
+	t.Helper()
 	for i, decl := range tpl.expressionNodesIterator() {
-		if vn, ok := decl.(*ast.ValueNode); ok {
-			if got, want := vn.Value.Value(), exp[i]; !reflect.DeepEqual(got, want) {
-				t.Fatalf("variables value %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
+		if node, ok := decl.(*ast.RightExpressionNode); ok {
+			if got, want := node.Result(), exp[i]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("right expression value %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
 			}
 		}
 
 	}
 }
 
-func assertCmdParams(t *testing.T, tpl *Template, exp ...params) {
+func assertCmdParams(t *testing.T, tpl *Template, exp ...map[string]interface{}) {
+	t.Helper()
 	for i, cmd := range tpl.CommandNodesIterator() {
-		if got, want := params(cmd.ToDriverParams()), exp[i]; !reflect.DeepEqual(got, want) {
+		if got, want := cmd.ToDriverParams(), exp[i]; !reflect.DeepEqual(got, want) {
 			t.Fatalf("params: cmd %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
-		}
-	}
-}
-
-func assertCmdHoles(t *testing.T, tpl *Template, exp ...holesKeys) {
-	for i, cmd := range tpl.CommandNodesIterator() {
-		h := make(map[string][]string)
-		for k, p := range cmd.Params {
-			if withHoles, ok := p.(ast.WithHoles); ok && len(withHoles.GetHoles()) > 0 {
-				for key := range withHoles.GetHoles() {
-					h[k] = append(h[k], key)
-				}
-			}
-		}
-		if got, want := holesKeys(h), exp[i]; !reflect.DeepEqual(got, want) {
-			t.Fatalf("holes keys: cmd %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
-		}
-	}
-}
-
-func assertCmdRefs(t *testing.T, tpl *Template, exp ...refs) {
-	for i, cmd := range tpl.CommandNodesIterator() {
-		r := make(map[string][]string)
-		for k, p := range cmd.Params {
-			if withRefs, ok := p.(ast.WithRefs); ok && len(withRefs.GetRefs()) > 0 {
-				r[k] = withRefs.GetRefs()
-			}
-		}
-		if got, want := refs(r), exp[i]; !reflect.DeepEqual(got, want) {
-			t.Fatalf("refs: cmd %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
-		}
-	}
-}
-
-func assertCmdAliases(t *testing.T, tpl *Template, exp ...aliases) {
-	for i, cmd := range tpl.CommandNodesIterator() {
-		r := make(map[string][]string)
-		for k, p := range cmd.Params {
-			if withAliases, ok := p.(ast.WithAlias); ok && len(withAliases.GetAliases()) > 0 {
-				r[k] = withAliases.GetAliases()
-			}
-		}
-		if got, want := aliases(r), exp[i]; !reflect.DeepEqual(got, want) {
-			t.Fatalf("refs: cmd %d: \ngot\n%v\n\nwant\n%v\n", i+1, got, want)
-		}
-	}
-}
-
-func checkContainsAll(t *testing.T, s, chars string) {
-	for _, e := range chars {
-		if !strings.ContainsRune(s, e) {
-			t.Fatalf("%s does not contain '%q'", s, e)
 		}
 	}
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/olekukonko/tablewriter"
 	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/cloud/match"
 	"github.com/wallix/awless/graph"
 )
 
@@ -60,7 +61,7 @@ type Builder struct {
 	reverseSort       bool
 	maxwidth          int
 	dataSource        interface{}
-	root              *graph.Resource
+	root              cloud.Resource
 	noHeaders         bool
 }
 
@@ -69,7 +70,8 @@ func (b *Builder) SetSource(i interface{}) *Builder {
 	return b
 }
 
-func (b *Builder) buildGraphFilters() (funcs []graph.FilterFn, err error) {
+func (b *Builder) buildQuery() (cloud.Query, error) {
+	var matchers []cloud.Matcher
 	for _, f := range b.filters {
 		splits := strings.SplitN(f, "=", 2)
 		if len(splits) == 2 {
@@ -77,52 +79,47 @@ func (b *Builder) buildGraphFilters() (funcs []graph.FilterFn, err error) {
 			key := ColumnDefinitions(b.columnDefinitions).resolveKey(name)
 
 			if key != "" {
-				funcs = append(funcs, graph.BuildPropertyFilterFunc(key, val))
+				matchers = append(matchers, match.Property(key, val).IgnoreCase().MatchString().Contains())
 			} else {
 				var allowed []string
 				for _, h := range b.columnDefinitions {
 					allowed = append(allowed, h.propKey())
 				}
-				err = fmt.Errorf("Invalid filter key '%s'. Expecting any of: %s. (Note: filter keys/values are case insensitive)", name, strings.Join(allowed, ", "))
+				return cloud.Query{}, fmt.Errorf("Invalid filter key '%s'. Expecting any of: %s. (Note: filter keys/values are case insensitive)", name, strings.Join(allowed, ", "))
 			}
 		}
-
 	}
-	return
-}
 
-func (b *Builder) buildGraphTagFilters() (funcs []graph.FilterFn) {
 	for _, f := range b.tagFilters {
 		splits := strings.SplitN(f, "=", 2)
 		if len(splits) == 2 {
 			key, val := strings.TrimSpace(splits[0]), strings.TrimSpace(splits[1])
-			funcs = append(funcs, graph.BuildTagFilterFunc(key, val))
+			matchers = append(matchers, match.Tag(key, val))
 		}
 	}
-	return
-}
 
-func (b *Builder) buildGraphTagKeyFilters() (funcs []graph.FilterFn) {
 	for _, k := range b.tagKeyFilters {
-		funcs = append(funcs, graph.BuildTagKeyFilterFunc(k))
+		matchers = append(matchers, match.TagKey(k))
 	}
-	return
-}
 
-func (b *Builder) buildGraphTagValueFilters() (funcs []graph.FilterFn) {
 	for _, v := range b.tagValueFilters {
-		funcs = append(funcs, graph.BuildTagValueFilterFunc(v))
+		matchers = append(matchers, match.TagValue(v))
 	}
-	return
+	q := cloud.NewQuery(b.rdfType)
+	if len(matchers) > 0 {
+		q = cloud.NewQuery(b.rdfType).Match(match.And(matchers...))
+	}
+
+	return q, nil
 }
 
 func (b *Builder) Build() (Displayer, error) {
 	base := fromGraphDisplayer{sorter: &defaultSorter{sortBy: b.sort, descending: b.reverseSort}, rdfType: b.rdfType, columnDefinitions: b.columnDefinitions, maxwidth: b.maxwidth, noHeaders: b.noHeaders}
 
 	switch b.dataSource.(type) {
-	case *graph.Graph:
+	case cloud.GraphAPI:
 		if b.rdfType == "" {
-			gph := b.dataSource.(*graph.Graph)
+			gph := b.dataSource.(cloud.GraphAPI)
 			switch b.format {
 			case "table":
 				dis := &multiResourcesTableDisplayer{base}
@@ -144,35 +141,13 @@ func (b *Builder) Build() (Displayer, error) {
 			}
 		}
 
-		filteredGraph := b.dataSource.(*graph.Graph)
-
-		if filters, err := b.buildGraphFilters(); len(filters) > 0 && err == nil {
-			filteredGraph, err = filteredGraph.Filter(b.rdfType, filters...)
-			if err != nil {
-				return nil, err
-			}
-		} else if err != nil {
+		filteredGraph := b.dataSource.(cloud.GraphAPI)
+		q, err := b.buildQuery()
+		if err != nil {
 			return nil, err
 		}
-
-		var ferr error
-		if filters := b.buildGraphTagFilters(); len(filters) > 0 {
-			filteredGraph, ferr = filteredGraph.Filter(b.rdfType, filters...)
-			if ferr != nil {
-				return nil, ferr
-			}
-		}
-		if filters := b.buildGraphTagKeyFilters(); len(filters) > 0 {
-			filteredGraph, ferr = filteredGraph.OrFilter(b.rdfType, filters...)
-			if ferr != nil {
-				return nil, ferr
-			}
-		}
-		if filters := b.buildGraphTagValueFilters(); len(filters) > 0 {
-			filteredGraph, ferr = filteredGraph.OrFilter(b.rdfType, filters...)
-			if ferr != nil {
-				return nil, ferr
-			}
+		if filteredGraph, err = filteredGraph.FilterGraph(q); err != nil {
+			return nil, err
 		}
 
 		switch b.format {
@@ -202,9 +177,9 @@ func (b *Builder) Build() (Displayer, error) {
 			dis.setGraph(filteredGraph)
 			return dis, nil
 		}
-	case *graph.Resource:
+	case cloud.Resource:
 		dis := &tableResourceDisplayer{columnDefinitions: b.columnDefinitions, maxwidth: b.maxwidth}
-		dis.SetResource(b.dataSource.(*graph.Resource))
+		dis.SetResource(b.dataSource.(cloud.Resource))
 		return dis, nil
 	case *graph.Diff:
 		base := fromDiffDisplayer{root: b.root}
@@ -361,7 +336,7 @@ func WithRdfType(rdfType string) optsFn {
 	}
 }
 
-func WithRootNode(root *graph.Resource) optsFn {
+func WithRootNode(root cloud.Resource) optsFn {
 	return func(b *Builder) *Builder {
 		b.root = root
 		return b
@@ -379,14 +354,14 @@ type table [][]interface{}
 
 type fromGraphDisplayer struct {
 	sorter
-	g                 *graph.Graph
+	g                 cloud.GraphAPI
 	rdfType           string
 	columnDefinitions []ColumnDefinition
 	maxwidth          int
 	noHeaders         bool
 }
 
-func (d *fromGraphDisplayer) setGraph(g *graph.Graph) {
+func (d *fromGraphDisplayer) setGraph(g cloud.GraphAPI) {
 	d.g = g
 }
 
@@ -395,7 +370,7 @@ type csvDisplayer struct {
 }
 
 func (d *csvDisplayer) Print(w io.Writer) error {
-	resources, err := d.g.GetAllResources(d.rdfType)
+	resources, err := d.g.Find(cloud.NewQuery(d.rdfType))
 	if err != nil {
 		return err
 	}
@@ -410,7 +385,7 @@ func (d *csvDisplayer) Print(w io.Writer) error {
 			values[i] = make([]interface{}, len(d.columnDefinitions))
 		}
 		for j, h := range d.columnDefinitions {
-			values[i][j] = res.Properties[h.propKey()]
+			values[i][j] = res.Properties()[h.propKey()]
 		}
 	}
 
@@ -430,7 +405,12 @@ func (d *csvDisplayer) Print(w io.Writer) error {
 	for i := range values {
 		var props []string
 		for j, h := range d.columnDefinitions {
-			props = append(props, h.format(values[i][j]))
+			val := h.format(values[i][j])
+			if strings.ContainsAny(val, ",\n\"") {
+				val = strings.Replace(val, "\"", "\"\"", -1) // Replace " in val by "" (cf https://tools.ietf.org/html/rfc4180)
+				val = "\"" + val + "\""
+			}
+			props = append(props, val)
 		}
 		buff.WriteString(strings.Join(props, ",") + "\n")
 	}
@@ -446,7 +426,7 @@ type tsvDisplayer struct {
 func (d *tsvDisplayer) Print(w io.Writer) error {
 	color.NoColor = true // as default tabwriter does not play nice with the color library
 
-	resources, err := d.g.GetAllResources(d.rdfType)
+	resources, err := d.g.Find(cloud.NewQuery(d.rdfType))
 	if err != nil {
 		return err
 	}
@@ -461,7 +441,7 @@ func (d *tsvDisplayer) Print(w io.Writer) error {
 			values[i] = make([]interface{}, len(d.columnDefinitions))
 		}
 		for j, h := range d.columnDefinitions {
-			values[i][j] = res.Properties[h.propKey()]
+			values[i][j] = res.Properties()[h.propKey()]
 		}
 	}
 
@@ -492,7 +472,7 @@ type jsonDisplayer struct {
 }
 
 func (d *jsonDisplayer) Print(w io.Writer) error {
-	resources, err := d.g.GetAllResources(d.rdfType)
+	resources, err := d.g.Find(cloud.NewQuery(d.rdfType))
 	if err != nil {
 		return err
 	}
@@ -501,7 +481,7 @@ func (d *jsonDisplayer) Print(w io.Writer) error {
 
 	var props []map[string]interface{}
 	for _, res := range resources {
-		props = append(props, res.Properties)
+		props = append(props, res.Properties())
 	}
 
 	enc := json.NewEncoder(w)
@@ -515,7 +495,7 @@ type tableDisplayer struct {
 }
 
 func (d *tableDisplayer) Print(w io.Writer) error {
-	resources, err := d.g.GetAllResources(d.rdfType)
+	resources, err := d.g.Find(cloud.NewQuery(d.rdfType))
 	if err != nil {
 		return err
 	}
@@ -534,7 +514,7 @@ func (d *tableDisplayer) Print(w io.Writer) error {
 			values[i] = make([]interface{}, len(d.columnDefinitions))
 		}
 		for j, h := range d.columnDefinitions {
-			values[i][j] = res.Properties[h.propKey()]
+			values[i][j] = res.Properties()[h.propKey()]
 		}
 	}
 
@@ -633,7 +613,7 @@ func (d *porcelainDisplayer) Print(w io.Writer) error {
 
 	var values table
 	for _, t := range types {
-		resources, err := d.g.GetAllResources(t)
+		resources, err := d.g.Find(cloud.NewQuery(t))
 		if err != nil {
 			return err
 		}
@@ -641,7 +621,7 @@ func (d *porcelainDisplayer) Print(w io.Writer) error {
 		for _, res := range resources {
 			var row = make([]interface{}, len(d.columnDefinitions))
 			for j, h := range d.columnDefinitions {
-				row[j] = res.Properties[h.propKey()]
+				row[j] = res.Properties()[h.propKey()]
 			}
 			values = append(values, row)
 		}
@@ -676,12 +656,12 @@ func (d *multiResourcesTableDisplayer) Print(w io.Writer) error {
 	var values table
 
 	for t, propDefs := range DefaultsColumnDefinitions {
-		resources, err := d.g.GetAllResources(t)
+		resources, err := d.g.Find(cloud.NewQuery(t))
 		if err != nil {
 			return err
 		}
 		for _, res := range resources {
-			for prop, val := range res.Properties {
+			for prop, val := range res.Properties() {
 				var header ColumnDefinition
 				for _, h := range propDefs {
 					if h.propKey() == prop {
@@ -732,18 +712,18 @@ type multiResourcesJSONDisplayer struct {
 }
 
 func (d *multiResourcesJSONDisplayer) Print(w io.Writer) error {
-	var resources []*graph.Resource
+	var resources []cloud.Resource
 	var err error
 
 	all := make(map[string]interface{})
 	for t := range DefaultsColumnDefinitions {
-		resources, err = d.g.GetAllResources(t)
+		resources, err = d.g.Find(cloud.NewQuery(t))
 		if err != nil {
 			return err
 		}
 		var props []map[string]interface{}
 		for _, res := range resources {
-			props = append(props, res.Properties)
+			props = append(props, res.Properties())
 		}
 		if len(resources) > 0 {
 			all[cloud.PluralizeResource(t)] = props
@@ -757,7 +737,7 @@ func (d *multiResourcesJSONDisplayer) Print(w io.Writer) error {
 }
 
 type fromDiffDisplayer struct {
-	root *graph.Resource
+	root cloud.Resource
 	diff *graph.Diff
 }
 
@@ -772,10 +752,11 @@ type diffTableDisplayer struct {
 func (d *diffTableDisplayer) Print(w io.Writer) error {
 	var values table
 
-	fromCommons := make(map[string]*graph.Resource)
-	toCommons := make(map[string]*graph.Resource)
+	fromCommons := make(map[string]cloud.Resource)
+	toCommons := make(map[string]cloud.Resource)
 	each := func(res *graph.Resource, distance int) error {
-		switch res.Meta["diff"] {
+		diff, _ := res.Meta("diff")
+		switch diff {
 		case "extra":
 			values = append(values, []interface{}{
 				res.Type(), color.New(color.FgRed).SprintFunc()("- " + nameOrID(res)), "", "",
@@ -785,13 +766,14 @@ func (d *diffTableDisplayer) Print(w io.Writer) error {
 		}
 		return nil
 	}
-	err := d.diff.FromGraph().Accept(&graph.ChildrenVisitor{From: d.root, Each: each})
+	err := d.diff.FromGraph().Accept(&graph.ChildrenVisitor{From: d.root.(*graph.Resource), Each: each})
 	if err != nil {
 		return err
 	}
 
 	each = func(res *graph.Resource, distance int) error {
-		switch res.Meta["diff"] {
+		meta, _ := res.Meta("diff")
+		switch meta {
 		case "extra":
 			values = append(values, []interface{}{
 				res.Type(), color.New(color.FgGreen).SprintFunc()("+ " + nameOrID(res)), "", "",
@@ -801,7 +783,7 @@ func (d *diffTableDisplayer) Print(w io.Writer) error {
 		}
 		return nil
 	}
-	err = d.diff.ToGraph().Accept(&graph.ChildrenVisitor{From: d.root, Each: each})
+	err = d.diff.ToGraph().Accept(&graph.ChildrenVisitor{From: d.root.(*graph.Resource), Each: each})
 	if err != nil {
 		return err
 	}
@@ -811,14 +793,14 @@ func (d *diffTableDisplayer) Print(w io.Writer) error {
 		naming := nameOrID(common)
 
 		if rem, ok := toCommons[common.Id()]; ok {
-			added := graph.Subtract(rem.Properties, common.Properties)
+			added := graph.Subtract(rem.Properties(), common.Properties())
 			for k, v := range added {
 				values = append(values, []interface{}{
 					resType, naming, k, color.New(color.FgGreen).SprintFunc()("+ " + fmt.Sprint(v)),
 				})
 			}
 
-			deleted := graph.Subtract(common.Properties, rem.Properties)
+			deleted := graph.Subtract(common.Properties(), rem.Properties())
 			for k, v := range deleted {
 				values = append(values, []interface{}{
 					resType, naming, k, color.New(color.FgRed).SprintFunc()("- " + fmt.Sprint(v)),
@@ -857,7 +839,8 @@ func (d *diffTreeDisplayer) Print(w io.Writer) error {
 	g := graph.NewGraph()
 
 	each := func(res *graph.Resource, distance int) error {
-		switch res.Meta["diff"] {
+		meta, _ := res.Meta("diff")
+		switch meta {
 		case "extra", "missing":
 			var parents []*graph.Resource
 			err := d.diff.MergedGraph().Accept(&graph.ParentsVisitor{From: res, Each: graph.VisitorCollectFunc(&parents)})
@@ -881,15 +864,15 @@ func (d *diffTreeDisplayer) Print(w io.Writer) error {
 		return nil
 	}
 
-	err := d.diff.MergedGraph().Accept(&graph.ChildrenVisitor{From: d.root, Each: each, IncludeFrom: true})
+	err := d.diff.MergedGraph().Accept(&graph.ChildrenVisitor{From: d.root.(*graph.Resource), Each: each, IncludeFrom: true})
 	if err != nil {
 		return err
 	}
 
 	each = func(res *graph.Resource, distance int) error {
 		tabs := strings.Repeat("\t", distance)
-
-		switch res.Meta["diff"] {
+		diffMeta, _ := res.Meta("diff")
+		switch diffMeta {
 		case "extra":
 			color.Set(color.FgGreen)
 			fmt.Fprintf(w, "+%s%s, %s\n", tabs, res.Type(), res.Id())
@@ -904,7 +887,7 @@ func (d *diffTreeDisplayer) Print(w io.Writer) error {
 		return nil
 	}
 
-	err = g.Accept(&graph.ChildrenVisitor{From: d.root, Each: each, IncludeFrom: true})
+	err = g.Accept(&graph.ChildrenVisitor{From: d.root.(*graph.Resource), Each: each, IncludeFrom: true})
 	if err != nil {
 		return err
 	}
@@ -955,7 +938,11 @@ func (d *defaultSorter) symbol() string {
 }
 
 func valueLowerOrEqual(a, b interface{}) bool {
-	if a == b {
+	if a == nil && b == nil {
+		return true
+	}
+	if aTyp, bTyp := reflect.TypeOf(a), reflect.TypeOf(b); aTyp != nil &&
+		aTyp.Comparable() && bTyp != nil && bTyp.Comparable() && a == b {
 		return true
 	}
 	if a == nil {
@@ -984,6 +971,8 @@ func valueLowerOrEqual(a, b interface{}) bool {
 		aa := a.(time.Time)
 		bb := b.(time.Time)
 		return aa.After(bb)
+	case []string, []int:
+		return fmt.Sprint(a) <= fmt.Sprint(b)
 	default:
 		panic(fmt.Sprintf("can not compare values of type %T", a))
 	}
@@ -1055,11 +1044,11 @@ func colWidthNoWraping(j int, t table, h ColumnDefinition, sortSymbol string) in
 	return max
 }
 
-func nameOrID(res *graph.Resource) string {
-	if name, ok := res.Properties["Name"]; ok && name != "" {
+func nameOrID(res cloud.Resource) string {
+	if name, ok := res.Property("Name"); ok && name != "" {
 		return fmt.Sprint(name)
 	}
-	if id, ok := res.Properties["Id"]; ok && id != "" {
+	if id, ok := res.Property("Id"); ok && id != "" {
 		return fmt.Sprint(id)
 	}
 	return res.Id()

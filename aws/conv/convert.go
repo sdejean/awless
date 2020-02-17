@@ -38,6 +38,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ecr"
 	"github.com/aws/aws-sdk-go/service/ecs"
+	"github.com/aws/aws-sdk-go/service/elb"
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/lambda"
@@ -89,6 +90,8 @@ func InitResource(source interface{}) (*graph.Resource, error) {
 	case *ec2.NetworkInterface:
 		res = graph.InitResource(cloud.NetworkInterface, awssdk.StringValue(ss.NetworkInterfaceId))
 	// Loadbalancer
+	case *elb.LoadBalancerDescription:
+		res = graph.InitResource(cloud.ClassicLoadBalancer, awssdk.StringValue(ss.LoadBalancerName))
 	case *elbv2.LoadBalancer:
 		res = graph.InitResource(cloud.LoadBalancer, awssdk.StringValue(ss.LoadBalancerArn))
 	case *elbv2.TargetGroup:
@@ -182,7 +185,8 @@ func NewResource(source interface{}) (*graph.Resource, error) {
 	if err != nil {
 		return res, err
 	}
-	res.Properties[properties.ID] = res.Id()
+
+	res.Properties()[properties.ID] = res.Id()
 
 	value := reflect.ValueOf(source)
 	if !value.IsValid() || value.Kind() != reflect.Ptr || value.IsNil() {
@@ -242,7 +246,7 @@ func NewResource(source interface{}) (*graph.Resource, error) {
 			if !ok {
 				return res, nil
 			}
-			res.Properties[keyVal.key] = keyVal.val
+			res.Properties()[keyVal.key] = keyVal.val
 		}
 	}
 
@@ -399,7 +403,6 @@ var extractRouteTableAssociationsFn = func(i interface{}) (interface{}, error) {
 	var keyVals []*graph.KeyValue
 	for _, assoc := range i.([]*ec2.RouteTableAssociation) {
 		keyval := &graph.KeyValue{KeyName: awssdk.StringValue(assoc.RouteTableAssociationId), Value: awssdk.StringValue(assoc.SubnetId)}
-
 		keyVals = append(keyVals, keyval)
 	}
 	return keyVals, nil
@@ -427,14 +430,18 @@ var extractFieldFn = func(field string) transformFn {
 }
 
 var extractTagsFn = func(i interface{}) (interface{}, error) {
-	tags, ok := i.([]*ec2.Tag)
-	if !ok {
-		return nil, fmt.Errorf("extract tags: not a tag slice, but a %T", i)
-	}
-
 	var out []string
-	for _, t := range tags {
-		out = append(out, fmt.Sprintf("%s=%s", awssdk.StringValue(t.Key), awssdk.StringValue(t.Value)))
+	switch tags := i.(type) {
+	case []*ec2.Tag:
+		for _, t := range tags {
+			out = append(out, fmt.Sprintf("%s=%s", awssdk.StringValue(t.Key), awssdk.StringValue(t.Value)))
+		}
+	case []*autoscaling.TagDescription:
+		for _, t := range tags {
+			out = append(out, fmt.Sprintf("%s=%s", awssdk.StringValue(t.Key), awssdk.StringValue(t.Value)))
+		}
+	default:
+		return nil, fmt.Errorf("extract tags: not a tag slice, but a %T", i)
 	}
 
 	return out, nil
@@ -485,6 +492,20 @@ var extractStringSliceValues = func(key string) transformFn {
 
 		return res, nil
 	}
+}
+
+var extractClassicLoadbListenerDescriptionsFn = func(i interface{}) (interface{}, error) {
+	listeners, ok := i.([]*elb.ListenerDescription)
+	if !ok {
+		return nil, fmt.Errorf("extract classic loadb listener descriptions: unexpected type %T", i)
+	}
+	var out []string
+	for _, d := range listeners {
+		if list := d.Listener; list != nil {
+			out = append(out, fmt.Sprintf("%s:%d:%s:%d", *list.Protocol, *list.LoadBalancerPort, *list.InstanceProtocol, *list.InstancePort))
+		}
+	}
+	return out, nil
 }
 
 var extractRoutesSliceFn = func(i interface{}) (interface{}, error) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 
+	"strings"
+
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
@@ -51,34 +53,86 @@ func forEachBucketParallel(ctx context.Context, cache fetch.Cache, api s3iface.S
 }
 
 func fetchObjectsForBucket(ctx context.Context, api s3iface.S3API, bucket *s3.Bucket, resourcesC chan<- *graph.Resource) error {
-	out, err := api.ListObjects(&s3.ListObjectsInput{Bucket: bucket.Name})
-	if err != nil {
-		return err
+	objectc := make(chan []*s3.Object)
+	errc := make(chan error)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := api.ListObjectsPages(&s3.ListObjectsInput{Bucket: bucket.Name}, func(page *s3.ListObjectsOutput, lastPage bool) bool {
+			objectc <- page.Contents
+			return !lastPage
+		}); err != nil {
+			errc <- err
+			return
+		}
+	}()
+
+	processObjects := func(objs []*s3.Object) {
+		for _, output := range objs {
+			res, err := awsconv.NewResource(output)
+			if err != nil {
+				errc <- err
+				return
+			}
+			res.SetProperty("Bucket", awssdk.StringValue(bucket.Name))
+			resourcesC <- res
+			parent, err := awsconv.InitResource(bucket)
+			if err != nil {
+				errc <- err
+				return
+			}
+			res.AddRelation(rdf.ChildrenOfRel, parent)
+			resourcesC <- parent
+		}
 	}
 
-	for _, output := range out.Contents {
-		res, err := awsconv.NewResource(output)
-		if err != nil {
-			return err
-		}
-		res.Properties["Bucket"] = awssdk.StringValue(bucket.Name)
-		resourcesC <- res
-		parent, err := awsconv.InitResource(bucket)
-		if err != nil {
-			return err
-		}
-		res.Relations[rdf.ChildrenOfRel] = append(res.Relations[rdf.ChildrenOfRel], parent)
-		resourcesC <- parent
-	}
+	go func() {
+		wg.Wait()
+		close(objectc)
+		close(errc)
+	}()
 
-	return nil
+	for {
+		select {
+		case err := <-errc:
+			return err
+		case objects, ok := <-objectc:
+			if !ok {
+				return nil
+			}
+			processObjects(objects)
+		}
+	}
 }
 
 func getBucketsPerRegion(ctx context.Context, api s3iface.S3API) ([]*s3.Bucket, error) {
 	var buckets []*s3.Bucket
+
 	out, err := api.ListBuckets(&s3.ListBucketsInput{})
 	if err != nil {
 		return buckets, err
+	}
+
+	var userBucketName string
+	var hasBucketFilter bool
+	if id, hasID := getUserFiltersFromContext(ctx)["id"]; hasID {
+		userBucketName = id
+		hasBucketFilter = true
+	} else if buck, hasBucket := getUserFiltersFromContext(ctx)["bucket"]; hasBucket {
+		userBucketName = buck
+		hasBucketFilter = true
+	}
+
+	if hasBucketFilter {
+		for _, b := range out.Buckets {
+			if strings.Contains(strings.ToLower(*b.Name), strings.ToLower(userBucketName)) {
+				buckets = append(buckets, b)
+			}
+		}
+	} else {
+		buckets = out.Buckets
 	}
 
 	bucketc := make(chan *s3.Bucket)
@@ -86,7 +140,7 @@ func getBucketsPerRegion(ctx context.Context, api s3iface.S3API) ([]*s3.Bucket, 
 
 	var wg sync.WaitGroup
 
-	for _, bucket := range out.Buckets {
+	for _, bucket := range buckets {
 		wg.Add(1)
 		go func(b *s3.Bucket) {
 			defer wg.Done()
@@ -112,17 +166,18 @@ func getBucketsPerRegion(ctx context.Context, api s3iface.S3API) ([]*s3.Bucket, 
 		close(bucketc)
 	}()
 
+	var bucketsInRegion []*s3.Bucket
 	for {
 		select {
 		case err := <-errc:
 			if err != nil {
-				return buckets, err
+				return bucketsInRegion, err
 			}
 		case b, ok := <-bucketc:
 			if !ok {
-				return buckets, nil
+				return bucketsInRegion, nil
 			}
-			buckets = append(buckets, b)
+			bucketsInRegion = append(bucketsInRegion, b)
 		}
 	}
 }

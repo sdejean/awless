@@ -22,6 +22,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/cloud/rdf"
 	tstore "github.com/wallix/triplestore"
 )
@@ -34,13 +35,19 @@ func NewGraph() *Graph {
 	return &Graph{tstore.NewSource()}
 }
 
-func NewGraphFromFile(filepath string) (*Graph, error) {
+func NewGraphFromFiles(files ...string) (cloud.GraphAPI, error) {
 	g := NewGraph()
-	f, err := os.Open(filepath)
-	if err != nil {
-		return g, err
+
+	var readers []io.Reader
+	for _, f := range files {
+		if reader, err := os.Open(f); err != nil {
+			return g, err
+		} else {
+			readers = append(readers, reader)
+		}
 	}
-	err = g.UnmarshalFromReaders(f)
+
+	err := g.UnmarshalFromReaders(readers...)
 	return g, err
 }
 
@@ -55,7 +62,7 @@ func (g *Graph) AddResource(resources ...*Resource) error {
 			return err
 		}
 
-		for relType, attachedRes := range res.Relations {
+		for relType, attachedRes := range res.relations {
 			switch relType {
 			case rdf.ChildrenOfRel:
 				for _, attached := range attachedRes {
@@ -155,6 +162,141 @@ func (g *Graph) ResolveResources(resolvers ...Resolver) ([]*Resource, error) {
 	return resources, nil
 }
 
+func (g *Graph) FilterGraph(q cloud.Query) (cloud.GraphAPI, error) {
+	if len(q.ResourceType) != 1 {
+		return nil, fmt.Errorf("invalid query: must have exactly one resource type, got %d", len(q.ResourceType))
+	}
+	resourceType := q.ResourceType[0]
+	return g.Filter(resourceType, func(r *Resource) bool {
+		if q.Matcher == nil {
+			return true
+		}
+		return q.Matcher.Match(r)
+	})
+}
+
+func (g *Graph) Find(q cloud.Query) ([]cloud.Resource, error) {
+	var resources []*Resource
+	var err error
+	switch len(q.ResourceType) {
+	case 0:
+		return nil, fmt.Errorf("invalid query: need at least one resource type")
+	case 1:
+		var filtered cloud.GraphAPI
+		filtered, err = g.FilterGraph(q)
+		if err != nil {
+			return nil, err
+		}
+		resources, err = filtered.(*Graph).GetAllResources(q.ResourceType[0])
+		if err != nil {
+			return nil, err
+		}
+	default:
+		if q.Matcher != nil {
+			return nil, fmt.Errorf("invalid query: can not filter whith multiple resource types")
+		}
+		resources, err = g.GetAllResources(q.ResourceType...)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var res []cloud.Resource
+	for _, r := range resources {
+		res = append(res, r)
+	}
+	return res, nil
+}
+
+func (g *Graph) FindWithProperties(props map[string]interface{}) ([]cloud.Resource, error) {
+	var resolvers []Resolver
+	for k, v := range props {
+		resolvers = append(resolvers, &ByProperty{Key: k, Value: v})
+	}
+	resources, err := g.ResolveResources(&And{Resolvers: resolvers})
+	if err != nil {
+		return nil, err
+	}
+
+	var res []cloud.Resource
+	for _, r := range resources {
+		res = append(res, r)
+	}
+	return res, nil
+}
+
+func (g *Graph) FindOne(q cloud.Query) (cloud.Resource, error) {
+	filtered, err := g.FilterGraph(q)
+	if err != nil {
+		return nil, err
+	}
+	resources, err := filtered.(*Graph).GetAllResources(q.ResourceType[0])
+	if err != nil {
+		return nil, err
+	}
+	switch len(resources) {
+	case 0:
+		return nil, fmt.Errorf("resource not found")
+	case 1:
+		return resources[0], nil
+	default:
+		return nil, fmt.Errorf("multiple resources found")
+	}
+}
+
+func (g *Graph) Merge(mg cloud.GraphAPI) error {
+	toMerge, ok := mg.(*Graph)
+	if !ok {
+		return fmt.Errorf("can not merge graphs, graph to merge is not a *graph.Graph, but a %T", mg)
+	}
+	g.AddGraph(toMerge)
+	return nil
+}
+
+func (g *Graph) ResourceRelations(from cloud.Resource, relation string, recursive bool) (collect []cloud.Resource, err error) {
+	collectFunc := func(r *Resource, depth int) error {
+		if depth == 1 || recursive {
+			collect = append(collect, r)
+		}
+		return nil
+	}
+	switch relation {
+	case rdf.ChildrenOfRel:
+		err = g.Accept(&ChildrenVisitor{From: from.(*Resource), IncludeFrom: false, Relation: rdf.ParentOf, Each: collectFunc})
+	case rdf.DependingOnRel:
+		err = g.Accept(&ParentsVisitor{From: from.(*Resource), IncludeFrom: false, Relation: rdf.ApplyOn, Each: collectFunc})
+	case rdf.ApplyOn:
+		err = g.Accept(&ChildrenVisitor{From: from.(*Resource), IncludeFrom: false, Relation: rdf.ApplyOn, Each: collectFunc})
+	default:
+		err = g.Accept(&ParentsVisitor{From: from.(*Resource), IncludeFrom: false, Relation: relation, Each: collectFunc})
+	}
+	return
+}
+
+func (g *Graph) VisitRelations(from cloud.Resource, relation string, includeFrom bool, each func(cloud.Resource, int) error) (err error) {
+	eachFunc := func(r *Resource, depth int) error {
+		return each(r, depth)
+	}
+	switch relation {
+	case rdf.ChildrenOfRel:
+		err = g.Accept(&ChildrenVisitor{From: from.(*Resource), IncludeFrom: includeFrom, Relation: rdf.ParentOf, Each: eachFunc})
+	case rdf.DependingOnRel:
+		err = g.Accept(&ParentsVisitor{From: from.(*Resource), IncludeFrom: includeFrom, Relation: rdf.ApplyOn, Each: eachFunc})
+	case rdf.ApplyOn:
+		err = g.Accept(&ChildrenVisitor{From: from.(*Resource), IncludeFrom: includeFrom, Relation: rdf.ApplyOn, Each: eachFunc})
+	default:
+		err = g.Accept(&ParentsVisitor{From: from.(*Resource), IncludeFrom: includeFrom, Relation: relation, Each: eachFunc})
+	}
+	return
+}
+
+func (g *Graph) ResourceSiblings(res cloud.Resource) (collect []cloud.Resource, err error) {
+	err = g.Accept(&SiblingsVisitor{From: res.(*Resource), IncludeFrom: false, Each: func(r *Resource, depth int) error {
+		collect = append(collect, r)
+		return nil
+	}})
+	return collect, err
+}
+
 func ResolveResourcesWithProp(snap tstore.RDFGraph, resType, propName, propVal string) ([]*Resource, error) {
 	resolv := ByTypeAndProperty{
 		Type:  resType,
@@ -229,7 +371,7 @@ func (g *Graph) Unmarshal(data []byte) error {
 }
 
 func (g *Graph) UnmarshalFromReaders(readers ...io.Reader) error {
-	dec := tstore.NewDatasetDecoder(tstore.NewAutoDecoder, readers...)
+	dec := tstore.NewDatasetDecoder(tstore.NewLenientNTDecoder, readers...)
 	ts, err := dec.Decode()
 	if err != nil {
 		return err

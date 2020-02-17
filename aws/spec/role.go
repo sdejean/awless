@@ -19,6 +19,10 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/iam/iamiface"
 	"github.com/wallix/awless/logger"
@@ -27,8 +31,9 @@ import (
 type CreateRole struct {
 	_                string `action:"create" entity:"role" awsAPI:"iam"`
 	logger           *logger.Logger
+	graph            cloud.GraphAPI
 	api              iamiface.IAMAPI
-	Name             *string   `awsName:"RoleName" awsType:"awsstr" templateName:"name" required:""`
+	Name             *string   `awsName:"RoleName" awsType:"awsstr" templateName:"name" `
 	PrincipalAccount *string   `templateName:"principal-account"`
 	PrincipalUser    *string   `templateName:"principal-user"`
 	PrincipalService *string   `templateName:"principal-service"`
@@ -36,14 +41,13 @@ type CreateRole struct {
 	SleepAfter       *int64    `templateName:"sleep-after"`
 }
 
-func (cmd *CreateRole) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree:   allOf(oneOfE(node("principal-account"), node("principal-user"), node("principal-service")), node("name")),
-		extras: []string{"conditions", "sleep-after"},
-	}.verify(params)
+func (cmd *CreateRole) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name"),
+		params.Opt("conditions", "principal-account", "principal-service", "principal-user", "sleep-after"),
+	))
 }
 
-func (cmd *CreateRole) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CreateRole) ManualRun(renv env.Running) (interface{}, error) {
 	princ := new(principal)
 	if cmd.PrincipalAccount != nil {
 		princ.AWS = StringValue(cmd.PrincipalAccount)
@@ -88,12 +92,12 @@ func (cmd *CreateRole) ManualRun(ctx map[string]interface{}) (interface{}, error
 
 	createInstProfile := CommandFactory.Build("createinstanceprofile")().(*CreateInstanceprofile)
 	createInstProfile.Name = cmd.Name
-	createInstProfile.Run(ctx, nil)
+	createInstProfile.Run(renv, nil)
 
 	attachRole := CommandFactory.Build("attachrole")().(*AttachRole)
 	attachRole.Name = role.RoleName
 	attachRole.Instanceprofile = role.RoleName
-	attachRole.Run(ctx, nil)
+	attachRole.Run(renv, nil)
 
 	if v := cmd.SleepAfter; v != nil {
 		vv := Int64AsIntValue(v)
@@ -111,23 +115,24 @@ func (cmd *CreateRole) ExtractResult(i interface{}) string {
 type DeleteRole struct {
 	_      string `action:"delete" entity:"role" awsAPI:"iam"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" `
 }
 
-func (cmd *DeleteRole) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteRole) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
-func (cmd *DeleteRole) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DeleteRole) ManualRun(renv env.Running) (interface{}, error) {
 	detachRole := CommandFactory.Build("detachrole")().(*DetachRole)
 	detachRole.Name = cmd.Name
 	detachRole.Instanceprofile = cmd.Name
-	detachRole.Run(ctx, nil)
+	detachRole.Run(renv, nil)
 
 	deleteInstProfile := CommandFactory.Build("deleteinstanceprofile")().(*DeleteInstanceprofile)
 	deleteInstProfile.Name = cmd.Name
-	deleteInstProfile.Run(ctx, nil)
+	deleteInstProfile.Run(renv, nil)
 
 	input := &iam.DeleteRoleInput{}
 	if err := setFieldWithType(cmd.Name, input, "RoleName", awsstr); err != nil {
@@ -143,23 +148,25 @@ func (cmd *DeleteRole) ManualRun(ctx map[string]interface{}) (interface{}, error
 type AttachRole struct {
 	_               string `action:"attach" entity:"role" awsAPI:"iam" awsCall:"AddRoleToInstanceProfile" awsInput:"iam.AddRoleToInstanceProfileInput" awsOutput:"iam.AddRoleToInstanceProfileOutput"`
 	logger          *logger.Logger
+	graph           cloud.GraphAPI
 	api             iamiface.IAMAPI
-	Instanceprofile *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"instanceprofile" required:""`
-	Name            *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" required:""`
+	Instanceprofile *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"instanceprofile" `
+	Name            *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" `
 }
 
-func (cmd *AttachRole) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachRole) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("instanceprofile"), params.Key("name")))
 }
 
 type DetachRole struct {
 	_               string `action:"detach" entity:"role" awsAPI:"iam" awsCall:"RemoveRoleFromInstanceProfile" awsInput:"iam.RemoveRoleFromInstanceProfileInput" awsOutput:"iam.RemoveRoleFromInstanceProfileOutput"`
 	logger          *logger.Logger
+	graph           cloud.GraphAPI
 	api             iamiface.IAMAPI
-	Instanceprofile *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"instanceprofile" required:""`
-	Name            *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" required:""`
+	Instanceprofile *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"instanceprofile" `
+	Name            *string `awsName:"RoleName" awsType:"awsstr" templateName:"name" `
 }
 
-func (cmd *DetachRole) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachRole) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("instanceprofile"), params.Key("name")))
 }

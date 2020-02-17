@@ -17,9 +17,6 @@ limitations under the License.
 package main
 
 import (
-	"bytes"
-	"io/ioutil"
-	"path/filepath"
 	"strings"
 	"text/template"
 
@@ -38,15 +35,7 @@ func generateServicesFuncs() {
 		panic(err)
 	}
 
-	var buff bytes.Buffer
-	err = templ.Execute(&buff, aws.FetchersDefs)
-	if err != nil {
-		panic(err)
-	}
-
-	if err := ioutil.WriteFile(filepath.Join(SERVICES_DIR, "gen_services.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, aws.FetchersDefs, SERVICES_DIR, "gen_services.go")
 }
 
 const servicesTempl = `// Auto generated implementation for the AWS cloud service
@@ -86,7 +75,6 @@ import (
   {{- end }}
 	"github.com/wallix/awless/cloud"
 	"github.com/wallix/awless/config"
-    "github.com/wallix/awless/graph"
 	"github.com/wallix/awless/logger"
 	"github.com/wallix/awless/fetch"
 	"github.com/wallix/awless/aws/fetch"
@@ -133,32 +121,23 @@ var APIPerResourceType = map[string]string {
 {{- end }}
 }
 
-var GlobalServices = []string{
-{{- range $index, $service := . }}
-    {{- if $service.Global }}
-      "{{ $service.Name }}",
-    {{- end }}
-{{- end }}
-}
-
 {{ range $index, $service := . }}
 type {{ Title $service.Name }} struct {
 	fetcher fetch.Fetcher
-  region string
-	config config
+  region, profile string
+	config map[string]interface{}
 	log *logger.Logger
 	{{- range $, $api := $service.Api }}
 		{{ $api }}iface.{{ ApiToInterface $api }}
 	{{- end }}
 }
 
-func New{{ Title $service.Name }}(sess *session.Session, awsconf config, log *logger.Logger) cloud.Service {
+func New{{ Title $service.Name }}(sess *session.Session, profile string, extraConf map[string]interface{}, log *logger.Logger) cloud.Service {
   {{- if $service.Global }}
 	region := "global"
 	{{- else}}
 	region := awssdk.StringValue(sess.Config.Region)
-	{{- end}}
-
+	{{- end}}	
 
 	{{- range $, $api := $service.Api }}
 		{{$api }}API := {{ $api }}.New(sess)
@@ -169,7 +148,7 @@ func New{{ Title $service.Name }}(sess *session.Session, awsconf config, log *lo
 			{{$api }}API,
 		{{- end }}
 	)
-	fetchConfig.Extra = awsconf
+	fetchConfig.Extra = extraConf
 	fetchConfig.Log = log
 
 	return &{{ Title $service.Name }}{ 
@@ -177,8 +156,9 @@ func New{{ Title $service.Name }}(sess *session.Session, awsconf config, log *lo
 		{{ApiToInterface $api }}: {{ $api }}API,
 	{{- end }}
 		fetcher: fetch.NewFetcher(awsfetch.Build{{ Title $service.Name }}FetchFuncs(fetchConfig)),
-		config: awsconf,
+		config: extraConf,
 		region: region,
+		profile: profile,
 		log: log,
   }
 }
@@ -191,6 +171,10 @@ func (s *{{ Title $service.Name }}) Region() string {
   return s.region
 }
 
+func (s *{{ Title $service.Name }}) Profile() string {
+  return s.profile
+}
+
 func (s *{{ Title $service.Name }}) ResourceTypes() []string {
 	return []string{
 	{{- range $index, $fetcher := $service.Fetchers }}
@@ -199,7 +183,7 @@ func (s *{{ Title $service.Name }}) ResourceTypes() []string {
 	}
 }
 
-func (s *{{ Title $service.Name }}) Fetch(ctx context.Context) (*graph.Graph, error) {
+func (s *{{ Title $service.Name }}) Fetch(ctx context.Context) (cloud.GraphAPI, error) {
 	if s.IsSyncDisabled() {
 		return graph.NewGraph(), nil
 	}
@@ -235,7 +219,7 @@ func (s *{{ Title $service.Name }}) Fetch(ctx context.Context) (*graph.Graph, er
 	var wg sync.WaitGroup
 
 	{{- range $index, $fetcher := $service.Fetchers }}
-	if s.config.getBool("aws.{{ $service.Name }}.{{ $fetcher.ResourceType }}.sync", true) {
+	if getBool(s.config, "aws.{{ $service.Name }}.{{ $fetcher.ResourceType }}.sync", true) {
 		list, err := s.fetcher.Get("{{ $fetcher.ResourceType }}_objects")
 		if err != nil {
 			return gph, err
@@ -277,13 +261,13 @@ func (s *{{ Title $service.Name }}) Fetch(ctx context.Context) (*graph.Graph, er
 	return gph, nil
 }
 
-func (s *{{ Title $service.Name }}) FetchByType(ctx context.Context, t string) (*graph.Graph, error) {
+func (s *{{ Title $service.Name }}) FetchByType(ctx context.Context, t string) (cloud.GraphAPI, error) {
 	defer s.fetcher.Reset()
   return s.fetcher.FetchByType(context.WithValue(ctx, "region", s.region), t)
 }
 
 func (s *{{ Title $service.Name }}) IsSyncDisabled() bool {
-	return !s.config.getBool("aws.{{ $service.Name }}.sync", true)
+	return !getBool(s.config, "aws.{{ $service.Name }}.sync", true)
 }
 
 {{ end }}`

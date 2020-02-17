@@ -28,6 +28,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/iam"
 	"github.com/aws/aws-sdk-go/service/iam/iamiface"
@@ -37,21 +41,24 @@ import (
 type CreatePolicy struct {
 	_           string `action:"create" entity:"policy" awsAPI:"iam" awsCall:"CreatePolicy" awsInput:"iam.CreatePolicyInput" awsOutput:"iam.CreatePolicyOutput"`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         iamiface.IAMAPI
-	Name        *string   `awsName:"PolicyName" awsType:"awsstr" templateName:"name" required:""`
-	Effect      *string   `templateName:"effect" required:""`
-	Action      []*string `templateName:"action" required:""`
-	Resource    []*string `templateName:"resource" required:""`
+	Name        *string   `awsName:"PolicyName" awsType:"awsstr" templateName:"name"`
+	Effect      *string   `templateName:"effect"`
+	Action      []*string `templateName:"action"`
+	Resource    []*string `templateName:"resource"`
 	Description *string   `awsName:"Description" awsType:"awsstr" templateName:"description"`
 	Document    *string   `awsName:"PolicyDocument" awsType:"awsstr"`
 	Conditions  []*string `templateName:"conditions"`
 }
 
-func (cmd *CreatePolicy) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreatePolicy) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("action"), params.Key("effect"), params.Key("name"), params.Key("resource"),
+		params.Opt("conditions", "description"),
+	))
 }
 
-func (cmd *CreatePolicy) BeforeRun(ctx map[string]interface{}) error {
+func (cmd *CreatePolicy) BeforeRun(renv env.Running) error {
 	stat, err := buildStatementFromParams(cmd.Effect, cmd.Resource, cmd.Action, cmd.Conditions)
 	if err != nil {
 		return err
@@ -77,21 +84,24 @@ func (cmd *CreatePolicy) ExtractResult(i interface{}) string {
 type UpdatePolicy struct {
 	_              string `action:"update" entity:"policy" awsAPI:"iam" awsCall:"CreatePolicyVersion" awsInput:"iam.CreatePolicyVersionInput" awsOutput:"iam.CreatePolicyVersionOutput"`
 	logger         *logger.Logger
+	graph          cloud.GraphAPI
 	api            iamiface.IAMAPI
-	Arn            *string   `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn" required:""`
-	Effect         *string   `templateName:"effect" required:""`
-	Action         []*string `templateName:"action" required:""`
-	Resource       []*string `templateName:"resource" required:""`
+	Arn            *string   `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn"`
+	Effect         *string   `templateName:"effect"`
+	Action         []*string `templateName:"action"`
+	Resource       []*string `templateName:"resource"`
 	Conditions     []*string `templateName:"conditions"`
 	Document       *string   `awsName:"PolicyDocument" awsType:"awsstr"`
 	DefaultVersion *bool     `awsName:"SetAsDefault" awsType:"awsbool"`
 }
 
-func (cmd *UpdatePolicy) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *UpdatePolicy) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("action"), params.Key("arn"), params.Key("effect"), params.Key("resource"),
+		params.Opt("conditions"),
+	))
 }
 
-func (cmd *UpdatePolicy) BeforeRun(ctx map[string]interface{}) error {
+func (cmd *UpdatePolicy) BeforeRun(renv env.Running) error {
 	document, err := cmd.getPolicyLastVersionDocument(cmd.Arn)
 	if err != nil {
 		return err
@@ -161,16 +171,19 @@ func (cmd *UpdatePolicy) getPolicyLastVersionDocument(arn *string) (string, erro
 type DeletePolicy struct {
 	_           string `action:"delete" entity:"policy" awsAPI:"iam"  awsCall:"DeletePolicy" awsInput:"iam.DeletePolicyInput" awsOutput:"iam.DeletePolicyOutput"`
 	logger      *logger.Logger
+	graph       cloud.GraphAPI
 	api         iamiface.IAMAPI
-	Arn         *string `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn" required:""`
+	Arn         *string `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn"`
 	AllVersions *bool   `templateName:"all-versions"`
 }
 
-func (cmd *DeletePolicy) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeletePolicy) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("arn"),
+		params.Opt("all-versions"),
+	))
 }
 
-func (cmd *DeletePolicy) BeforeRun(ctx map[string]interface{}) error {
+func (cmd *DeletePolicy) BeforeRun(renv env.Running) error {
 	if BoolValue(cmd.AllVersions) {
 		list, err := cmd.api.ListPolicyVersions(&iam.ListPolicyVersionsInput{PolicyArn: cmd.Arn})
 		if err != nil {
@@ -191,6 +204,7 @@ func (cmd *DeletePolicy) BeforeRun(ctx map[string]interface{}) error {
 type AttachPolicy struct {
 	_       string `action:"attach" entity:"policy" awsAPI:"iam"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     iamiface.IAMAPI
 	Arn     *string `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn"`
 	User    *string `awsName:"UserName" awsType:"awsstr" templateName:"user"`
@@ -200,31 +214,31 @@ type AttachPolicy struct {
 	Access  *string `templateName:"access"`
 }
 
-func (cmd *AttachPolicy) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree: allOf(oneOfE(node("user"), node("role"), node("group")), oneOf(node("arn"), allOf(node("access"), node("service")))),
-	}.verify(params)
+func (cmd *AttachPolicy) ParamsSpec() params.Spec {
+	builder := params.SpecBuilder(params.AllOf(
+		params.OnlyOneOf(params.Key("user"), params.Key("role"), params.Key("group")),
+		params.OnlyOneOf(params.Key("arn"), params.AllOf(params.Key("access"), params.Key("service"))),
+	))
+	builder.AddReducer(transformAccessServiceToARN, "access", "service")
+	return builder.Done()
 }
 
-func (cmd *AttachPolicy) ConvertParams() ([]string, func(values map[string]interface{}) (map[string]interface{}, error)) {
-	return []string{"access", "service"},
-		func(values map[string]interface{}) (map[string]interface{}, error) {
-			service, hasService := values["service"].(string)
-			access, hasAccess := values["access"].(string)
+func transformAccessServiceToARN(values map[string]interface{}) (map[string]interface{}, error) {
+	service, hasService := values["service"].(string)
+	access, hasAccess := values["access"].(string)
 
-			if hasService && hasAccess {
-				pol, err := lookupAWSPolicy(service, access)
-				if err != nil {
-					return values, err
-				}
-				return map[string]interface{}{"arn": pol.Arn}, nil
-			} else {
-				return nil, nil
-			}
+	if hasService && hasAccess {
+		pol, err := lookupAWSPolicy(service, access)
+		if err != nil {
+			return values, err
 		}
+		return map[string]interface{}{"arn": pol.Arn}, nil
+	} else {
+		return nil, nil
+	}
 }
 
-func (cmd *AttachPolicy) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AttachPolicy) ManualRun(renv env.Running) (interface{}, error) {
 	start := time.Now()
 	switch {
 	case cmd.User != nil:
@@ -256,6 +270,7 @@ func (cmd *AttachPolicy) ManualRun(ctx map[string]interface{}) (interface{}, err
 type DetachPolicy struct {
 	_      string `action:"detach" entity:"policy" awsAPI:"iam"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
 	Arn    *string `awsName:"PolicyArn" awsType:"awsstr" templateName:"arn"`
 	User   *string `awsName:"UserName" awsType:"awsstr" templateName:"user"`
@@ -263,31 +278,16 @@ type DetachPolicy struct {
 	Role   *string `awsName:"RoleName" awsType:"awsstr" templateName:"role"`
 }
 
-func (cmd *DetachPolicy) ValidateParams(params []string) ([]string, error) {
-	return paramRule{
-		tree: allOf(oneOfE(node("user"), node("role"), node("group")), oneOf(node("arn"), allOf(node("access"), node("service")))),
-	}.verify(params)
+func (cmd *DetachPolicy) ParamsSpec() params.Spec {
+	builder := params.SpecBuilder(params.AllOf(
+		params.OnlyOneOf(params.Key("user"), params.Key("role"), params.Key("group")),
+		params.OnlyOneOf(params.Key("arn"), params.AllOf(params.Key("access"), params.Key("service"))),
+	))
+	builder.AddReducer(transformAccessServiceToARN, "access", "service")
+	return builder.Done()
 }
 
-func (cmd *DetachPolicy) ConvertParams() ([]string, func(values map[string]interface{}) (map[string]interface{}, error)) {
-	return []string{"access", "service"},
-		func(values map[string]interface{}) (map[string]interface{}, error) {
-			service, hasService := values["service"].(string)
-			access, hasAccess := values["access"].(string)
-
-			if hasService && hasAccess {
-				pol, err := lookupAWSPolicy(service, access)
-				if err != nil {
-					return values, err
-				}
-				return map[string]interface{}{"arn": pol.Arn}, nil
-			} else {
-				return nil, nil
-			}
-		}
-}
-
-func (cmd *DetachPolicy) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachPolicy) ManualRun(renv env.Running) (interface{}, error) {
 	start := time.Now()
 	switch {
 	case cmd.User != nil:

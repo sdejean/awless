@@ -18,6 +18,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	awssdk "github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -28,13 +32,14 @@ import (
 type CreateVolume struct {
 	_                string `action:"create" entity:"volume" awsAPI:"ec2" awsCall:"CreateVolume" awsInput:"ec2.CreateVolumeInput" awsOutput:"ec2.Volume" awsDryRun:""`
 	logger           *logger.Logger
+	graph            cloud.GraphAPI
 	api              ec2iface.EC2API
-	Availabilityzone *string `awsName:"AvailabilityZone" awsType:"awsstr" templateName:"availabilityzone" required:""`
-	Size             *int64  `awsName:"Size" awsType:"awsint64" templateName:"size" required:""`
+	Availabilityzone *string `awsName:"AvailabilityZone" awsType:"awsstr" templateName:"availabilityzone"`
+	Size             *int64  `awsName:"Size" awsType:"awsint64" templateName:"size"`
 }
 
-func (cmd *CreateVolume) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateVolume) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("availabilityzone"), params.Key("size")))
 }
 
 func (cmd *CreateVolume) ExtractResult(i interface{}) string {
@@ -44,21 +49,23 @@ func (cmd *CreateVolume) ExtractResult(i interface{}) string {
 type CheckVolume struct {
 	_       string `action:"check" entity:"volume" awsAPI:"ec2"`
 	logger  *logger.Logger
+	graph   cloud.GraphAPI
 	api     ec2iface.EC2API
-	Id      *string `templateName:"id" required:""`
-	State   *string `templateName:"state" required:""`
-	Timeout *int64  `templateName:"timeout" required:""`
+	Id      *string `templateName:"id"`
+	State   *string `templateName:"state"`
+	Timeout *int64  `templateName:"timeout"`
 }
 
-func (cmd *CheckVolume) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CheckVolume) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("id"), params.Key("state"), params.Key("timeout")),
+		params.Validators{
+			"state": params.IsInEnumIgnoreCase("available", "in-use", notFoundState),
+		},
+	)
 }
 
-func (cmd *CheckVolume) Validate_State() error {
-	return NewEnumValidator("available", "in-use", notFoundState).Validate(cmd.State)
-}
-
-func (cmd *CheckVolume) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *CheckVolume) ManualRun(renv env.Running) (interface{}, error) {
 	input := &ec2.DescribeVolumesInput{VolumeIds: []*string{cmd.Id}}
 
 	c := &checker{
@@ -93,27 +100,28 @@ func (cmd *CheckVolume) ManualRun(ctx map[string]interface{}) (interface{}, erro
 type DeleteVolume struct {
 	_      string `action:"delete" entity:"volume" awsAPI:"ec2" awsCall:"DeleteVolume" awsInput:"ec2.DeleteVolumeInput" awsOutput:"ec2.DeleteVolumeOutput" awsDryRun:""`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    ec2iface.EC2API
-	Id     *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id" required:""`
+	Id     *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id"`
 }
 
-func (cmd *DeleteVolume) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteVolume) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("id")))
 }
 
 type AttachVolume struct {
 	_        string `action:"attach" entity:"volume" awsAPI:"ec2" awsCall:"AttachVolume" awsInput:"ec2.AttachVolumeInput" awsOutput:"ec2.VolumeAttachment" awsDryRun:""`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Device   *string `awsName:"Device" awsType:"awsstr" templateName:"device" required:""`
-	Id       *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id" required:""`
-	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance" required:""`
+	Device   *string `awsName:"Device" awsType:"awsstr" templateName:"device"`
+	Id       *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id"`
+	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance"`
 }
 
-func (cmd *AttachVolume) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachVolume) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("device"), params.Key("id"), params.Key("instance")))
 }
-
 func (cmd *AttachVolume) ExtractResult(i interface{}) string {
 	return awssdk.StringValue(i.(*ec2.VolumeAttachment).VolumeId)
 }
@@ -121,15 +129,18 @@ func (cmd *AttachVolume) ExtractResult(i interface{}) string {
 type DetachVolume struct {
 	_        string `action:"detach" entity:"volume" awsAPI:"ec2" awsCall:"DetachVolume" awsInput:"ec2.DetachVolumeInput" awsOutput:"ec2.VolumeAttachment" awsDryRun:""`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Device   *string `awsName:"Device" awsType:"awsstr" templateName:"device" required:""`
-	Id       *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id" required:""`
-	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance" required:""`
+	Device   *string `awsName:"Device" awsType:"awsstr" templateName:"device"`
+	Id       *string `awsName:"VolumeId" awsType:"awsstr" templateName:"id"`
+	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance"`
 	Force    *bool   `awsName:"Force" awsType:"awsbool" templateName:"force"`
 }
 
-func (cmd *DetachVolume) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachVolume) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("device"), params.Key("id"), params.Key("instance"),
+		params.Opt("force"),
+	))
 }
 
 func (cmd *DetachVolume) ExtractResult(i interface{}) string {

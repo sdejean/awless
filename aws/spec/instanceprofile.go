@@ -19,6 +19,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"time"
 
 	"github.com/aws/aws-sdk-go/service/ec2"
@@ -30,39 +34,44 @@ import (
 type CreateInstanceprofile struct {
 	_      string `action:"create" entity:"instanceprofile" awsAPI:"iam" awsCall:"CreateInstanceProfile" awsInput:"iam.CreateInstanceProfileInput" awsOutput:"iam.CreateInstanceProfileOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *CreateInstanceprofile) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *CreateInstanceprofile) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 type DeleteInstanceprofile struct {
 	_      string `action:"delete" entity:"instanceprofile" awsAPI:"iam" awsCall:"DeleteInstanceProfile" awsInput:"iam.DeleteInstanceProfileInput" awsOutput:"iam.DeleteInstanceProfileOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    iamiface.IAMAPI
-	Name   *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"name" required:""`
+	Name   *string `awsName:"InstanceProfileName" awsType:"awsstr" templateName:"name"`
 }
 
-func (cmd *DeleteInstanceprofile) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteInstanceprofile) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 type AttachInstanceprofile struct {
 	_        string `action:"attach" entity:"instanceprofile" awsAPI:"ec2" awsDryRun:"manual"`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance" required:""`
-	Name     *string `awsName:"IamInstanceProfile.Name" awsType:"awsstr" templateName:"name" required:""`
+	Instance *string `awsName:"InstanceId" awsType:"awsstr" templateName:"instance"`
+	Name     *string `awsName:"IamInstanceProfile.Name" awsType:"awsstr" templateName:"name"`
 	Replace  *bool   `templateName:"replace"`
 }
 
-func (cmd *AttachInstanceprofile) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachInstanceprofile) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("instance"), params.Key("name"),
+		params.Opt("replace"),
+	))
 }
 
-func (cmd *AttachInstanceprofile) DryRun(ctx, params map[string]interface{}) (interface{}, error) {
+func (cmd *AttachInstanceprofile) dryRun(renv env.Running, params map[string]interface{}) (interface{}, error) {
 	if err := cmd.inject(params); err != nil {
 		return nil, fmt.Errorf("cannot set params on command struct: %s", err)
 	}
@@ -86,7 +95,7 @@ func (cmd *AttachInstanceprofile) DryRun(ctx, params map[string]interface{}) (in
 	return fakeDryRunId("instanceprofile"), nil
 }
 
-func (cmd *AttachInstanceprofile) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AttachInstanceprofile) ManualRun(renv env.Running) (interface{}, error) {
 	instanceId := StringValue(cmd.Instance)
 	profileName := StringValue(cmd.Name)
 
@@ -129,10 +138,10 @@ func (cmd *AttachInstanceprofile) ManualRun(ctx map[string]interface{}) (interfa
 	}
 
 	input := &ec2.AssociateIamInstanceProfileInput{}
-	if err := setFieldWithType(instanceId, input, "InstanceId", awsstr, ctx); err != nil {
+	if err := setFieldWithType(instanceId, input, "InstanceId", awsstr, renv.Context()); err != nil {
 		return nil, err
 	}
-	if err := setFieldWithType(profileName, input, "IamInstanceProfile.Name", awsstr, ctx); err != nil {
+	if err := setFieldWithType(profileName, input, "IamInstanceProfile.Name", awsstr, renv.Context()); err != nil {
 		return nil, err
 	}
 
@@ -145,16 +154,17 @@ func (cmd *AttachInstanceprofile) ManualRun(ctx map[string]interface{}) (interfa
 type DetachInstanceprofile struct {
 	_        string `action:"detach" entity:"instanceprofile" awsAPI:"ec2"`
 	logger   *logger.Logger
+	graph    cloud.GraphAPI
 	api      ec2iface.EC2API
-	Instance *string `templateName:"instance" required:""`
-	Name     *string `templateName:"name" required:""`
+	Instance *string `templateName:"instance"`
+	Name     *string `templateName:"name"`
 }
 
-func (cmd *DetachInstanceprofile) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachInstanceprofile) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("instance"), params.Key("name")))
 }
 
-func (cmd *DetachInstanceprofile) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachInstanceprofile) ManualRun(renv env.Running) (interface{}, error) {
 	instanceId := StringValue(cmd.Instance)
 	profileName := StringValue(cmd.Name)
 

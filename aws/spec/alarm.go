@@ -19,6 +19,10 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/template/env"
+	"github.com/wallix/awless/template/params"
+
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/aws/aws-sdk-go/service/cloudwatch/cloudwatchiface"
@@ -28,15 +32,16 @@ import (
 type CreateAlarm struct {
 	_                       string `action:"create" entity:"alarm" awsAPI:"cloudwatch" awsCall:"PutMetricAlarm" awsInput:"cloudwatch.PutMetricAlarmInput" awsOutput:"cloudwatch.PutMetricAlarmOutput"`
 	logger                  *logger.Logger
+	graph                   cloud.GraphAPI
 	api                     cloudwatchiface.CloudWatchAPI
-	Name                    *string   `awsName:"AlarmName" awsType:"awsstr" templateName:"name" required:""`
-	Operator                *string   `awsName:"ComparisonOperator" awsType:"awsstr" templateName:"operator" required:""`
-	Metric                  *string   `awsName:"MetricName" awsType:"awsstr" templateName:"metric" required:""`
-	Namespace               *string   `awsName:"Namespace" awsType:"awsstr" templateName:"namespace" required:""`
-	EvaluationPeriods       *int64    `awsName:"EvaluationPeriods" awsType:"awsint64" templateName:"evaluation-periods" required:""`
-	Period                  *int64    `awsName:"Period" awsType:"awsint64" templateName:"period" required:""`
-	StatisticFunction       *string   `awsName:"Statistic" awsType:"awsstr" templateName:"statistic-function" required:""`
-	Threshold               *float64  `awsName:"Threshold" awsType:"awsfloat" templateName:"threshold" required:""`
+	Name                    *string   `awsName:"AlarmName" awsType:"awsstr" templateName:"name"`
+	Operator                *string   `awsName:"ComparisonOperator" awsType:"awsstr" templateName:"operator"`
+	Metric                  *string   `awsName:"MetricName" awsType:"awsstr" templateName:"metric"`
+	Namespace               *string   `awsName:"Namespace" awsType:"awsstr" templateName:"namespace"`
+	EvaluationPeriods       *int64    `awsName:"EvaluationPeriods" awsType:"awsint64" templateName:"evaluation-periods"`
+	Period                  *int64    `awsName:"Period" awsType:"awsint64" templateName:"period"`
+	StatisticFunction       *string   `awsName:"Statistic" awsType:"awsstr" templateName:"statistic-function"`
+	Threshold               *float64  `awsName:"Threshold" awsType:"awsfloat" templateName:"threshold"`
 	Enabled                 *bool     `awsName:"ActionsEnabled" awsType:"awsbool" templateName:"enabled"`
 	AlarmActions            []*string `awsName:"AlarmActions" awsType:"awsstringslice" templateName:"alarm-actions"`
 	InsufficientdataActions []*string `awsName:"InsufficientDataActions" awsType:"awsstringslice" templateName:"insufficientdata-actions"`
@@ -46,12 +51,14 @@ type CreateAlarm struct {
 	Unit                    *string   `awsName:"Unit" awsType:"awsstr" templateName:"unit"`
 }
 
-func (cmd *CreateAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
-}
-
-func (cmd *CreateAlarm) Validate_Operator() error {
-	return NewEnumValidator("GreaterThanThreshold", "LessThanThreshold", "LessThanOrEqualToThreshold", "GreaterThanOrEqualToThreshold").Validate(cmd.Operator)
+func (cmd *CreateAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(
+		params.AllOf(params.Key("evaluation-periods"), params.Key("metric"), params.Key("name"), params.Key("namespace"), params.Key("operator"), params.Key("period"), params.Key("statistic-function"), params.Key("threshold"),
+			params.Opt("alarm-actions", "description", "dimensions", "enabled", "insufficientdata-actions", "ok-actions", "unit"),
+		),
+		params.Validators{
+			"operator": params.IsInEnumIgnoreCase("GreaterThanThreshold", "LessThanThreshold", "LessThanOrEqualToThreshold", "GreaterThanOrEqualToThreshold"),
+		})
 }
 
 func (cmd *CreateAlarm) ExtractResult(i interface{}) string {
@@ -61,49 +68,53 @@ func (cmd *CreateAlarm) ExtractResult(i interface{}) string {
 type DeleteAlarm struct {
 	_      string `action:"delete" entity:"alarm" awsAPI:"cloudwatch" awsCall:"DeleteAlarms" awsInput:"cloudwatch.DeleteAlarmsInput" awsOutput:"cloudwatch.DeleteAlarmsOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    cloudwatchiface.CloudWatchAPI
-	Name   []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"name" required:""`
+	Name   []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"name"`
 }
 
-func (cmd *DeleteAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DeleteAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("name")))
 }
 
 type StartAlarm struct {
 	_      string `action:"start" entity:"alarm" awsAPI:"cloudwatch" awsCall:"EnableAlarmActions" awsInput:"cloudwatch.EnableAlarmActionsInput" awsOutput:"cloudwatch.EnableAlarmActionsOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    cloudwatchiface.CloudWatchAPI
-	Names  []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"names" required:""`
+	Names  []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"names"`
 }
 
-func (cmd *StartAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *StartAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("names")))
 }
 
 type StopAlarm struct {
 	_      string `action:"stop" entity:"alarm" awsAPI:"cloudwatch" awsCall:"DisableAlarmActions" awsInput:"cloudwatch.DisableAlarmActionsInput" awsOutput:"cloudwatch.DisableAlarmActionsOutput"`
 	logger *logger.Logger
+	graph  cloud.GraphAPI
 	api    cloudwatchiface.CloudWatchAPI
-	Names  []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"names" required:""`
+	Names  []*string `awsName:"AlarmNames" awsType:"awsstringslice" templateName:"names"`
 }
 
-func (cmd *StopAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *StopAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("names")))
 }
 
 type AttachAlarm struct {
 	_         string `action:"attach" entity:"alarm" awsAPI:"cloudwatch"`
 	logger    *logger.Logger
+	graph     cloud.GraphAPI
 	api       cloudwatchiface.CloudWatchAPI
-	Name      *string `templateName:"name" required:""`
-	ActionArn *string `templateName:"action-arn" required:""`
+	Name      *string `templateName:"name"`
+	ActionArn *string `templateName:"action-arn"`
 }
 
-func (cmd *AttachAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *AttachAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("action-arn"), params.Key("name")))
 }
 
-func (cmd *AttachAlarm) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *AttachAlarm) ManualRun(renv env.Running) (interface{}, error) {
 	alarm, err := getAlarm(cmd.api, cmd.Name)
 	if err != nil {
 		return nil, err
@@ -135,16 +146,17 @@ func (cmd *AttachAlarm) ManualRun(ctx map[string]interface{}) (interface{}, erro
 type DetachAlarm struct {
 	_         string `action:"detach" entity:"alarm" awsAPI:"cloudwatch"`
 	logger    *logger.Logger
+	graph     cloud.GraphAPI
 	api       cloudwatchiface.CloudWatchAPI
-	Name      *string `templateName:"name" required:""`
-	ActionArn *string `templateName:"action-arn" required:""`
+	Name      *string `templateName:"name"`
+	ActionArn *string `templateName:"action-arn"`
 }
 
-func (cmd *DetachAlarm) ValidateParams(params []string) ([]string, error) {
-	return validateParams(cmd, params)
+func (cmd *DetachAlarm) ParamsSpec() params.Spec {
+	return params.NewSpec(params.AllOf(params.Key("action-arn"), params.Key("name")))
 }
 
-func (cmd *DetachAlarm) ManualRun(ctx map[string]interface{}) (interface{}, error) {
+func (cmd *DetachAlarm) ManualRun(renv env.Running) (interface{}, error) {
 	alarm, err := getAlarm(cmd.api, cmd.Name)
 	if err != nil {
 		return nil, err

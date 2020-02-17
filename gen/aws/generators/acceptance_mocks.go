@@ -8,11 +8,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"html/template"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
+	"text/template"
 
 	"github.com/wallix/awless/gen/aws"
 )
@@ -146,15 +145,8 @@ func generateAcceptanceMocks() {
 	if err != nil {
 		panic(err)
 	}
-	var buff bytes.Buffer
-	err = templ.Execute(&buff, apis)
-	if err != nil {
-		panic(err)
-	}
 
-	if err = ioutil.WriteFile(filepath.Join(AWSAT_DIR, "gen_mocks.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, apis, AWSAT_DIR, "gen_mocks.go")
 }
 
 func generateAcceptanceFactory() {
@@ -180,15 +172,7 @@ func generateAcceptanceFactory() {
 		panic(err)
 	}
 
-	var buff bytes.Buffer
-	err = templ.Execute(&buff, finder.result)
-	if err != nil {
-		panic(err)
-	}
-
-	if err = ioutil.WriteFile(filepath.Join(AWSAT_DIR, "gen_factory.go"), buff.Bytes(), 0666); err != nil {
-		panic(err)
-	}
+	writeTemplateToFile(templ, finder.result, AWSAT_DIR, "gen_factory.go")
 }
 
 type apiInfo struct {
@@ -223,19 +207,22 @@ limitations under the License.
 // This file was automatically generated with go generate
 package awsat
 
-import "github.com/wallix/awless/aws/spec"
+import (
+  "github.com/wallix/awless/aws/spec"
+)
 
 type AcceptanceFactory struct {
 	Mock   interface{}
 	Logger *logger.Logger
+	Graph cloud.GraphAPI
 }
 
-func NewAcceptanceFactory(mock interface{}, l ...*logger.Logger) *AcceptanceFactory {
+func NewAcceptanceFactory(mock interface{}, g cloud.GraphAPI, l ...*logger.Logger) *AcceptanceFactory {
 	logger := logger.DiscardLogger
 	if len(l) > 0 {
 		logger = l[0]
 	}
-	return &AcceptanceFactory{Mock: mock, Logger: logger}
+	return &AcceptanceFactory{Mock: mock, Graph:g, Logger: logger}
 }
 
 func (f *AcceptanceFactory) Build(key string) func() interface{} {
@@ -243,7 +230,7 @@ func (f *AcceptanceFactory) Build(key string) func() interface{} {
 		{{- range $cmdName, $cmd := . }}
 		case "{{ $cmd.Action }}{{ $cmd.Entity }}":
 			return func() interface{} {
-				cmd := awsspec.New{{ $cmdName }}(nil, f.Logger)
+				cmd := awsspec.New{{ $cmdName }}(nil, f.Graph, f.Logger)
 				cmd.SetApi(f.Mock.({{$cmd.API}}iface.{{ ApiToInterface $cmd.API }}))
 				return cmd
 			}

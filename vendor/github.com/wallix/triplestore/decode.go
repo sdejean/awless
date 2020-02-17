@@ -59,7 +59,7 @@ type ntDecoder struct {
 }
 
 func (d *ntDecoder) Decode() ([]Triple, error) {
-	return newLenientNTParser(d.r).parse()
+	return newLenientNTParser(d.r).Parse()
 }
 
 func (d *ntDecoder) StreamDecode(ctx context.Context) <-chan DecodeResult {
@@ -75,7 +75,7 @@ func (d *ntDecoder) StreamDecode(ctx context.Context) <-chan DecodeResult {
 				return
 			default:
 				if scanner.Scan() {
-					tris, err := newLenientNTParser(strings.NewReader(scanner.Text())).parse()
+					tris, err := newLenientNTParser(strings.NewReader(scanner.Text())).Parse()
 					if err != nil {
 						decC <- DecodeResult{Err: err}
 					} else if len(tris) == 1 {
@@ -148,10 +148,16 @@ func (dec *binaryDecoder) Decode() ([]Triple, error) {
 }
 
 func decodeTriple(r io.Reader) (Triple, bool, error) {
-	sub, err := readWord(r)
+	var isSubBNode bool
+	err := binary.Read(r, binary.BigEndian, &isSubBNode)
 	if err == io.EOF {
 		return nil, true, nil
 	} else if err != nil {
+		return nil, false, fmt.Errorf("is subject bnode: %s", err)
+	}
+
+	sub, err := readWord(r)
+	if err != nil {
 		return nil, false, fmt.Errorf("subject: %s", err)
 	}
 
@@ -172,30 +178,49 @@ func decodeTriple(r io.Reader) (Triple, bool, error) {
 			return nil, false, fmt.Errorf("resource: %s", err)
 		}
 		decodedObj.resource = string(resource)
-
+	} else if objType == bnodeTypeEncoding {
+		bnode, err := readWord(r)
+		if err != nil {
+			return nil, false, fmt.Errorf("bnode object: %s", err)
+		}
+		decodedObj.bnode = string(bnode)
+		decodedObj.isBnode = true
 	} else {
 		decodedObj.isLit = true
 		var decodedLiteral literal
 
-		litType, err := readWord(r)
-		if err != nil {
-			return nil, false, fmt.Errorf("literate type: %s", err)
+		if objType == literalWithLangEncoding {
+			lang, err := readWord(r)
+			if err != nil {
+				return nil, false, fmt.Errorf("lang: %s", err)
+			}
+			decodedLiteral.langtag = string(lang)
+		} else {
+			litType, err := readWord(r)
+			if err != nil {
+				return nil, false, fmt.Errorf("literate type: %s", err)
+			}
+			decodedLiteral.typ = XsdType(litType)
 		}
-		decodedLiteral.typ = XsdType(litType)
 
 		val, err := readWord(r)
 		if err != nil {
 			return nil, false, fmt.Errorf("literate: %s", err)
 		}
+		if decodedLiteral.typ == XsdString || objType == literalWithLangEncoding {
+			decodedLiteral.val = unescapeStringLiteral(string(val))
+		} else {
+			decodedLiteral.val = string(val)
+		}
 
-		decodedLiteral.val = string(val)
 		decodedObj.lit = decodedLiteral
 	}
 
 	return &triple{
-		sub:  subject(string(sub)),
-		pred: predicate(string(pred)),
-		obj:  decodedObj,
+		isSubBnode: isSubBNode,
+		sub:        string(sub),
+		pred:       string(pred),
+		obj:        decodedObj,
 	}, false, nil
 }
 
@@ -218,7 +243,7 @@ type datasetDecoder struct {
 	rs             []io.Reader
 }
 
-// A dataset is a basically a collection of RDFGraph.
+// NewDatasetDecoder - a dataset is a basically a collection of RDFGraph.
 func NewDatasetDecoder(fn func(io.Reader) Decoder, readers ...io.Reader) Decoder {
 	return &datasetDecoder{newDecoderFunc: fn, rs: readers}
 }
@@ -267,4 +292,10 @@ func (dec *datasetDecoder) Decode() ([]Triple, error) {
 	}
 
 	return all, nil
+}
+
+var unescaper = strings.NewReplacer("\\n", "\n", "\\r", "\r")
+
+func unescapeStringLiteral(s string) string {
+	return unescaper.Replace(s)
 }

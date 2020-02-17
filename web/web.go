@@ -12,6 +12,9 @@ import (
 
 	"github.com/gorilla/mux"
 	"github.com/wallix/awless/aws/services"
+	"github.com/wallix/awless/cloud"
+	"github.com/wallix/awless/cloud/properties"
+	"github.com/wallix/awless/cloud/rdf"
 	"github.com/wallix/awless/graph"
 	"github.com/wallix/awless/sync"
 	"github.com/wallix/awless/sync/repo"
@@ -19,23 +22,26 @@ import (
 )
 
 type server struct {
-	port string
-	gph  *graph.Graph
+	port       string
+	awsProfile string
+	gph        cloud.GraphAPI
 }
 
-func New(port string) *server {
-	return &server{port: port}
+func New(port, profile string) *server {
+	return &server{port: port, awsProfile: profile}
 }
 
 func (s *server) Start() error {
-	g, err := sync.LoadAllLocalGraphs()
+	log.Printf("Retrieving all local synced regions for the '%s' profile\n", s.awsProfile)
+	log.Println("(use awless web -p otherprofile for browsing through another profile)")
+	g, err := sync.LoadAllLocalGraphs(s.awsProfile)
 	if err != nil {
 		return fmt.Errorf("cannot load local graphs: %s", err)
 	}
 
 	s.gph = g
 
-	log.Printf("Starting browsing on http://localhost%s\n", s.port)
+	log.Printf("Starting browsing at http://localhost%s\n", s.port)
 	return http.ListenAndServe(s.port, s.routes())
 }
 
@@ -61,7 +67,7 @@ func (s *server) homeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) rdfHandler(w http.ResponseWriter, r *http.Request) {
-	tris, err := loadLocalTriples()
+	tris, err := loadLocalTriples(s.awsProfile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -86,7 +92,7 @@ func (s *server) graphHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
-	tris, err := loadLocalTriples()
+	tris, err := loadLocalTriples(s.awsProfile)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -111,24 +117,22 @@ func (s *server) showResourceHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resId := mux.Vars(r)["id"]
-	res, err := s.gph.FindResource(resId)
-	if err != nil {
+	res, err := s.gph.FindWithProperties(map[string]interface{}{properties.ID: resId})
+	if err != nil && len(res) != 1 {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 	}
 
-	resource := newResource(res)
-	deps, _ := s.gph.ListResourcesDependingOn(res)
+	resource := newResource(res[0])
+	deps, _ := s.gph.ResourceRelations(res[0], rdf.DependingOnRel, false)
 	resource.AddDependsOn(deps...)
-	applies, _ := s.gph.ListResourcesAppliedOn(res)
+	applies, _ := s.gph.ResourceRelations(res[0], rdf.ApplyOn, false)
 	resource.AddAppliesOn(applies...)
 
-	var parents []*graph.Resource
-	s.gph.Accept(&graph.ParentsVisitor{From: res, Each: graph.VisitorCollectFunc(&parents)})
-	resource.AddParents(parents...)
+	parents, _ := s.gph.ResourceRelations(res[0], rdf.ParentOf, true)
+	resource.AddDependsOn(parents...)
 
-	var children []*graph.Resource
-	s.gph.Accept(&graph.ChildrenVisitor{From: res, Each: graph.VisitorCollectFunc(&children)})
-	resource.AddChildren(children...)
+	children, _ := s.gph.ResourceRelations(res[0], rdf.ChildrenOfRel, true)
+	resource.AddDependsOn(children...)
 
 	if err := t.Execute(w, resource); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -145,7 +149,7 @@ func (s *server) listResourcesHandler(w http.ResponseWriter, r *http.Request) {
 	resourcesByTypes := make(map[string][]*Resource)
 
 	for _, typ := range append(awsservices.ResourceTypes, "region") {
-		gRes, err := s.gph.GetAllResources(typ)
+		gRes, err := s.gph.Find(cloud.NewQuery(typ))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -171,19 +175,19 @@ type Resource struct {
 	AppliesOn  []*Resource
 }
 
-func (r *Resource) AddDependsOn(gr ...*graph.Resource) {
+func (r *Resource) AddDependsOn(gr ...cloud.Resource) {
 	for _, res := range gr {
 		r.DependsOn = append(r.DependsOn, newResource(res))
 	}
 }
 
-func (r *Resource) AddAppliesOn(gr ...*graph.Resource) {
+func (r *Resource) AddAppliesOn(gr ...cloud.Resource) {
 	for _, res := range gr {
 		r.AppliesOn = append(r.AppliesOn, newResource(res))
 	}
 }
 
-func (r *Resource) AddParents(gr ...*graph.Resource) {
+func (r *Resource) AddParents(gr ...cloud.Resource) {
 	for _, res := range gr {
 		r.Parents = append(r.Parents, newResource(res))
 	}
@@ -195,12 +199,12 @@ func (r *Resource) AddChildren(gr ...*graph.Resource) {
 	}
 }
 
-func newResource(r *graph.Resource) *Resource {
-	return &Resource{Id: r.Id(), Type: r.Type(), Properties: r.Properties}
+func newResource(r cloud.Resource) *Resource {
+	return &Resource{Id: r.Id(), Type: r.Type(), Properties: r.Properties()}
 }
 
-func loadLocalTriples() ([]tstore.Triple, error) {
-	path := filepath.Join(repo.BaseDir(), "*", fmt.Sprintf("*%s", ".triples"))
+func loadLocalTriples(profile string) ([]tstore.Triple, error) {
+	path := filepath.Join(repo.BaseDir(), profile, "*", fmt.Sprintf("*%s", ".nt"))
 	files, _ := filepath.Glob(path)
 
 	var readers []io.Reader

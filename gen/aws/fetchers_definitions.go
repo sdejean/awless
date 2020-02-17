@@ -62,7 +62,7 @@ type fetcher struct {
 var FetchersDefs = []fetchersDef{
 	{
 		Name: "infra",
-		Api:  []string{"ec2", "elbv2", "rds", "autoscaling", "ecr", "ecs", "applicationautoscaling", "acm"},
+		Api:  []string{"ec2", "elbv2", "elb", "rds", "autoscaling", "ecr", "ecs", "applicationautoscaling", "acm"},
 		Fetchers: []fetcher{
 			{Api: "ec2", ResourceType: cloud.Instance, AWSType: "ec2.Instance", ApiMethod: "DescribeInstancesPages", Input: "ec2.DescribeInstancesInput{}", Output: "ec2.DescribeInstancesOutput", OutputsExtractor: "Instances", OutputsContainers: "Reservations", Multipage: true, NextPageMarker: "NextToken"},
 			{Api: "ec2", ResourceType: cloud.Subnet, AWSType: "ec2.Subnet", ApiMethod: "DescribeSubnets", Input: "ec2.DescribeSubnetsInput{}", Output: "ec2.DescribeSubnetsOutput", OutputsExtractor: "Subnets"},
@@ -79,6 +79,7 @@ var FetchersDefs = []fetchersDef{
 			{Api: "ec2", ResourceType: cloud.ElasticIP, AWSType: "ec2.Address", ApiMethod: "DescribeAddresses", Input: "ec2.DescribeAddressesInput{}", Output: "ec2.DescribeAddressesOutput", OutputsExtractor: "Addresses"},
 			{Api: "ec2", ResourceType: cloud.Snapshot, AWSType: "ec2.Snapshot", ApiMethod: "DescribeSnapshotsPages", Input: "ec2.DescribeSnapshotsInput{OwnerIds:[]*string{awssdk.String(\"self\")}}", Output: "ec2.DescribeSnapshotsOutput", OutputsExtractor: "Snapshots", Multipage: true, NextPageMarker: "NextToken"},
 			{Api: "ec2", ResourceType: cloud.NetworkInterface, AWSType: "ec2.NetworkInterface", ApiMethod: "DescribeNetworkInterfaces", Input: "ec2.DescribeNetworkInterfacesInput{}", Output: "ec2.DescribeNetworkInterfacesOutput", OutputsExtractor: "NetworkInterfaces"},
+			{Api: "elb", ResourceType: cloud.ClassicLoadBalancer, AWSType: "elb.LoadBalancerDescription", ApiMethod: "DescribeLoadBalancersPages", Input: "elb.DescribeLoadBalancersInput{}", Output: "elb.DescribeLoadBalancersOutput", OutputsExtractor: "LoadBalancerDescriptions", Multipage: true, NextPageMarker: "NextMarker"},
 			{Api: "elbv2", ResourceType: cloud.LoadBalancer, AWSType: "elbv2.LoadBalancer", ApiMethod: "DescribeLoadBalancersPages", Input: "elbv2.DescribeLoadBalancersInput{}", Output: "elbv2.DescribeLoadBalancersOutput", OutputsExtractor: "LoadBalancers", Multipage: true, NextPageMarker: "NextMarker"},
 			{Api: "elbv2", ResourceType: cloud.TargetGroup, AWSType: "elbv2.TargetGroup", ApiMethod: "DescribeTargetGroups", Input: "elbv2.DescribeTargetGroupsInput{}", Output: "elbv2.DescribeTargetGroupsOutput", OutputsExtractor: "TargetGroups"},
 			{Api: "elbv2", ResourceType: cloud.Listener, AWSType: "elbv2.Listener", ManualFetcher: true},
@@ -101,8 +102,8 @@ var FetchersDefs = []fetchersDef{
 		Api:    []string{"iam", "sts"},
 		Fetchers: []fetcher{
 			{Api: "iam", ResourceType: cloud.User, AWSType: "iam.UserDetail", ManualFetcher: true},
-			{Api: "iam", ResourceType: cloud.Group, AWSType: "iam.GroupDetail", ApiMethod: "GetAccountAuthorizationDetailsPages", Input: "iam.GetAccountAuthorizationDetailsInput{Filter: []*string{awssdk.String(iam.EntityTypeGroup)}}", Output: "iam.GetAccountAuthorizationDetailsOutput", OutputsExtractor: "GroupDetailList", Multipage: true, NextPageMarker: "Marker"},
-			{Api: "iam", ResourceType: cloud.Role, AWSType: "iam.RoleDetail", ApiMethod: "GetAccountAuthorizationDetailsPages", Input: "iam.GetAccountAuthorizationDetailsInput{Filter: []*string{awssdk.String(iam.EntityTypeRole)}}", Output: "iam.GetAccountAuthorizationDetailsOutput", OutputsExtractor: "RoleDetailList", Multipage: true, NextPageMarker: "Marker"},
+			{Api: "iam", ResourceType: cloud.Group, AWSType: "iam.GroupDetail", ManualFetcher: true},
+			{Api: "iam", ResourceType: cloud.Role, AWSType: "iam.RoleDetail", ManualFetcher: true},
 			{Api: "iam", ResourceType: cloud.Policy, AWSType: "iam.Policy", ManualFetcher: true},
 			{Api: "iam", ResourceType: cloud.AccessKey, AWSType: "iam.AccessKeyMetadata", ManualFetcher: true},
 			{Api: "iam", ResourceType: cloud.InstanceProfile, AWSType: "iam.InstanceProfile", ApiMethod: "ListInstanceProfilesPages", Input: "iam.ListInstanceProfilesInput{}", Output: "iam.ListInstanceProfilesOutput", OutputsExtractor: "InstanceProfiles", Multipage: true, NextPageMarker: "Marker"},

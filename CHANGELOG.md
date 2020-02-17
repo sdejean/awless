@@ -1,12 +1,100 @@
-## v0.1.9 [unreleased]
+## v0.1.11 [2018-06-21]
+
+**Check out our new article** on [Simplified Multi-Factor Authentication](https://medium.com/@awlessCLI/simplified-multi-factor-authentication-for-aws-d703e8d9f332) with `awless`
 
 ### Features
 
+- [#71](https://github.com/wallix/awless/issues/71): Add support for Classic load-balancers:
+
+```
+    $ awless list classicloadbalancers
+    $ awless create classicloadbalancer name=my-loadb subnets=[sub-123,sub-456] listeners=HTTP:80:HTTP:8080 healthcheck-path=/health/ping  securitygroups=sg-54321 tags=Env:Test,Created:Awless
+    $ awless update classicloadbalancer name=my-loadb health-interval=10 health-target=HTTP:80/weather/ health-timeout=300 healthy-threshold=10  unhealthy-threshold=5
+    $ awless attach classicloadbalancer name=my-loadb instance=@redis-prod-1
+    $ awless delete classicloadbalancer name=my-loadb
+```
+
+- [#214](https://github.com/wallix/awless/issues/214): `AWS_PROFILE` env variable now loaded in `awless` in addition to the deprecated `AWS_DEFAULT_PROFILE` thanks to @alewando
+- Better completion for `attach mfadevice` and `attach user` commands
+- [#219](https://github.com/wallix/awless/issues/219): Validate access key and secret key before writing into `~/.aws/credentials` file
+
+### Fixes
+
+- [#220](https://github.com/wallix/awless/issues/220): Add double quotes to CSV output if needed thanks to @lllama
+- Fix compilation error in templates with concatenation and reference (c.f. for example in [this template](https://gist.githubusercontent.com/fxaguessy/ef9511bf5ed8f3312904cccb96b818e8/raw/75c0f808220665441055b589be133cf711c64f37/ManageOwnMFA.aws))
+- Parse integer beginning with '0' as string (preventing the deletion of the initial '0' for example in `... account.id=0123456789`)
+
+## v0.1.10 [2018-04-13]
+
+### Features
+
+- Much better performance when synchronising all access data (IAM, etc.)
+- Create instances now supports distro prompting for CentOS, Amazon Linux 2, CoreOS
+   
+      $ awless create instance name=myinst distro=amazonlinux:amzn2
+      $ awless create instance distro=coreos
+      $ awless create instance distro=centos name=myinst
+
+- Avoiding extra throttling: Listing flag `--filter` now passes on the user wanted filtering down to the AWS API when possible so that _less unneeded resources are fetched_, _bandwidth is reduced_ and _some throttling avoided_.
+  
+  For example:
+  
+      $ awless ls s3objects --filter bucket=website
+      $ awless ls records --filter name=io
+      $ awless ls containertasks --filter name=my-task-definition-name
+
+- Support for region embedded in an AWS profile (i.e. shared config files ~/.aws/{credentials,config}). See #181 in Fixes for more details 
+      
+- [#191](https://github.com/wallix/awless/issues/191) Attach a certificate to a listener with: `awless listener attach id=... certificate=...` (see awless attach listener -h for more)
+
+
+### Fixes
+
+- [#200](https://github.com/wallix/awless/issues/200): Now paging is supported for s3 objects when listing
+- [#196](https://github.com/wallix/awless/issues/196): Regression fix SIGSEV when having AWS config with role assuming
+- [#182](https://github.com/wallix/awless/issues/182): Region embedded in profile taken into account and given correct precedence
+- [#144](https://github.com/wallix/awless/issues/144): Filtering done on AWS side when listing records for a given zone name
+- [#172](https://github.com/wallix/awless/issues/172): Filtering done on AWS side when listing containertasks for a given task definition name
+
+## v0.1.9 [2018-01-16]
+
+**In this release, the local data model has been updated to support multi-account and stale data is removed when upgrading. Local data (ex: used for completion, etc...) will progressively be synced again through your usage of awless. Although, to get all your data now under the new model, you can manually run `'awless sync'`**	
+
+### Features
+
+- Support and seamless sync across multi-account (i.e. multiple profiles) and regions
+- Enriched params prompting with optional/skippable but very common params. Can be disabled with `--prompt-only-required` or forced with `--prompt-all` to leverage smart completion for all params
+- Automatically complete the username when deleting an access key by its ID, if it is contained in the local graph model:
+    * `awless delete accesskey id=ACCESSKEYID`
+-  For `awless update stack` param `stackfile` can now slurp yml and json params files. Thanks to @Trane9991 ([#167](https://github.com/wallix/awless/pull/167), [#145](https://github.com/wallix/awless/issues/145))
+- Better completion for template parameters independently of their display name
+- Aliases can now be resolved to properties other than IDs. For example, they are resolved to ARN in attach/detach/update/delete policy: `awless attach policy arn=@my-policy-name`
+- Running only `awless switch` now returns your current region and profile, allowing a quick and short region/profile lookup
+- Better completion of slice properties 
+
+### AWS Services
+
+- Listing of Route53 records now contains a new column for aliases [#181](https://github.com/wallix/awless/issues/181)
 - Create an image from an existing instance. See `awless create image -h`
     * `awless create image instance=@my-instance-name name=redis-image  description='redis prod image'`
     * `awless create image instance=i-0ee436a45561c04df name=redis-image reboot=true`
     * List your images with `awless ls images --sort created`
     * Delete images with an `awless revert ...` or with `awless delete image id=@redis-image`
+- [#169](https://github.com/wallix/awless/issues/169): Start/Stop a RDS database:
+    * `awless start database id=my-db-id`
+    * `awless stop database id=@my-db-name`
+    * `awless restart database id=@my-db-name`
+- Restart an EC2 instance
+  * `awless restart instance id=id-1234`
+  * `awless restart instance ids=@redis-prod-1,@redis-prod-2`
+- [#176](https://github.com/wallix/awless/issues/176): Delete a DNS record only by its awless ID (see `awless ls records`) or by its name:
+    * `awless delete record id=awls-39ec0618`
+    * `awless delete record id=@my.sub.domain.com`
+
+### Fixes
+
+- Fix regression error: errors in dry run showed but where ignored hence user could wrongly confirm to run the template
+- Delete a DNS record only by its awless ID
 
 ## v0.1.8 [2017-11-29]
 

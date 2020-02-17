@@ -5,12 +5,14 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/wallix/awless/aws/spec"
 	"github.com/wallix/awless/template/internal/ast"
 )
 
 func TestRevertOneliner(t *testing.T) {
 	tcases := []struct {
-		in, exp string
+		in, exp   string
+		cmdResult interface{}
 	}{
 		{in: "create instanceprofile name=stuff", exp: "delete instanceprofile name=stuff"},
 		{in: "delete instanceprofile name=stuff", exp: "create instanceprofile name=stuff"},
@@ -21,20 +23,41 @@ func TestRevertOneliner(t *testing.T) {
 		{in: "update securitygroup cidr=0.0.0.0/0 id=sg-12345 outbound=revoke portrange=443 protocol=tcp", exp: "update securitygroup cidr=0.0.0.0/0 id=sg-12345 outbound=authorize portrange=443 protocol=tcp"},
 		{in: "attach mfadevice id=my-mfa-device-id user=toto mfa-code-1=1234 mfa-code-2=2345", exp: "detach mfadevice id=my-mfa-device-id user=toto"},
 		{in: "detach mfadevice id=my-mfa-device-id user=toto", exp: "attach mfadevice id=my-mfa-device-id user=toto"},
+
+		{in: "stop instance ids=inst-id-1", exp: "check instance id=inst-id-1 state=stopped timeout=180\nstart instance ids=inst-id-1", cmdResult: "inst-id-1"},
+		{in: "start instance ids=inst-id-1", exp: "check instance id=inst-id-1 state=running timeout=180\nstop instance ids=inst-id-1", cmdResult: "inst-id-1"},
+
+		{in: "stop instance ids=inst-id-1,inst-id-2", exp: "check instance id=inst-id-1 state=stopped timeout=180\ncheck instance id=inst-id-2 state=stopped timeout=180\nstart instance ids=[inst-id-1,inst-id-2]", cmdResult: "inst-id-1"},
+		{in: "start instance ids=inst-id-1,inst-id-2", exp: "check instance id=inst-id-1 state=running timeout=180\ncheck instance id=inst-id-2 state=running timeout=180\nstop instance ids=[inst-id-1,inst-id-2]", cmdResult: "inst-id-1"},
+
+		{in: "stop database id=my-db-id", exp: "start database id=my-db-id"},
+		{in: "start database id=my-db-id", exp: "stop database id=my-db-id"},
+
+		{in: "create instanceprofile name='my funny name with spaces'", exp: "delete instanceprofile name='my funny name with spaces'"},
+		{in: "create appscalingtarget dimension=dim max-capacity=10 min-capacity=4 resource=['one res','two','three','4', 5, '4.3', 5.1] role=role service-namespace=ecs", exp: "delete appscalingtarget dimension=dim resource=['one res',two,three,'4',5,'4.3',5.1] service-namespace=ecs"},
+
+		{in: "create classicloadbalancer name=my-classic-loadb", exp: "delete classicloadbalancer name=my-classic-loadb", cmdResult: "my-classic-loadb"},
 	}
 
 	for _, tcase := range tcases {
-		reverted, err := MustParse(tcase.in).Revert()
+		parsed := MustParse(tcase.in)
+		if tcase.cmdResult != nil {
+			parsed.CommandNodesIterator()[0].CmdResult = tcase.cmdResult
+		}
+		reverted, err := parsed.Revert()
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("case '%s': %s", tcase.in, err)
 		}
 		if got, want := reverted.String(), tcase.exp; got != want {
-			t.Fatalf("got: %s\nwant: %s\n", got, want)
+			t.Fatalf("got\n%q\n\nwant\n%q\n", got, want)
 		}
 	}
 }
 
 func TestRevertTemplate(t *testing.T) {
+	env := NewEnv().WithLookupCommandFunc(func(tokens ...string) interface{} {
+		return awsspec.MockAWSSessionFactory.Build(strings.Join(tokens, ""))()
+	}).Build()
 	t.Run("Simple template", func(t *testing.T) {
 		tpl := MustParse("create instance type=t2.micro")
 		for _, cmd := range tpl.CommandNodesIterator() {
@@ -73,8 +96,11 @@ func TestRevertTemplate(t *testing.T) {
 	})
 
 	t.Run("More advanced template", func(t *testing.T) {
-		tpl := MustParse("attach policy arn=stuff user=mrT\ncreate vpc\ncreate subnet\nstart instance id=i-54g3hj\ncreate tag key=Key resource=myinst value=Value\ncreate instance")
-		for i, cmd := range tpl.CommandNodesIterator() {
+		compiled, _, err := Compile(MustParse("attach policy arn=stuff user=mrT\ncreate vpc cidr=10.0.0.0/16\ncreate subnet vpc=vpc-1234 cidr=10.0.0.0/24\nstart instance ids=i-54g3hj\ncreate tag key=Key resource=myinst value=Value\ncreate instance count=1 image=ami-1234 name=myinstance subnet=sub-1234 type=t2.nano"), env, NewRunnerCompileMode)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, cmd := range compiled.CommandNodesIterator() {
 			if i == 1 {
 				cmd.CmdResult = "vpc-12345"
 			}
@@ -89,14 +115,14 @@ func TestRevertTemplate(t *testing.T) {
 			}
 		}
 
-		reverted, err := tpl.Revert()
+		reverted, err := compiled.Revert()
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		exp := "delete tag key=Key resource=myinst value=Value\ncheck instance id=i-54g3hj state=running timeout=180\nstop instance id=i-54g3hj\ndelete subnet id=sub-12345\ndelete vpc id=vpc-12345\ndetach policy arn=stuff user=mrT"
+		exp := "delete tag key=Key resource=myinst value=Value\ncheck instance id=i-54g3hj state=running timeout=180\nstop instance ids=i-54g3hj\ndelete subnet id=sub-12345\ndelete vpc id=vpc-12345\ndetach policy arn=stuff user=mrT"
 		if got, want := reverted.String(), exp; got != want {
-			t.Fatalf("got: %s\nwant: %s\n", got, want)
+			t.Fatalf("got: \n%s\n\nwant:\n%s\n", got, want)
 		}
 	})
 
@@ -386,7 +412,7 @@ stop containertask cluster=cl deployment-name=dpname type=service`
 func TestCmdNodeIsRevertible(t *testing.T) {
 	tcases := []struct {
 		line, result string
-		params       map[string]ast.CompositeValue
+		params       map[string]interface{}
 		err          error
 		revertible   bool
 	}{
@@ -405,8 +431,8 @@ func TestCmdNodeIsRevertible(t *testing.T) {
 		{line: "detach routetable", revertible: false},
 		{line: "start alarm", revertible: true},
 		{line: "stop alarm", revertible: true},
-		{line: "start containertask", params: map[string]ast.CompositeValue{"type": ast.NewInterfaceValue("service")}, revertible: true},
-		{line: "start containertask", params: map[string]ast.CompositeValue{"type": ast.NewInterfaceValue("task")}, revertible: true},
+		{line: "start containertask", params: map[string]interface{}{"type": "service"}, revertible: true},
+		{line: "start containertask", params: map[string]interface{}{"type": "task"}, revertible: true},
 	}
 
 	for _, tc := range tcases {
@@ -414,7 +440,7 @@ func TestCmdNodeIsRevertible(t *testing.T) {
 		action, entity := splits[0], splits[1]
 		cmd := &ast.CommandNode{Action: action, Entity: entity, CmdResult: tc.result, CmdErr: tc.err}
 		if tc.params != nil {
-			cmd.Params = tc.params
+			cmd.ParamNodes = tc.params
 		}
 		if tc.revertible != isRevertible(cmd) {
 			t.Fatalf("expected '%s' to have revertible=%t", cmd, tc.revertible)
